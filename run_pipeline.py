@@ -1,5 +1,11 @@
 # run_pipeline.py  –  one-stop CLI for the whole workflow (Ollama report only)
 from __future__ import annotations
+import io
+import sys
+
+# Fix encoding on Windows
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 # Set a non-interactive backend for matplotlib to prevent GUI-related crashes
 import matplotlib
