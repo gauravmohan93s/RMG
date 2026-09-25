@@ -1,0 +1,73 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+.venv_3.12/
+ENV/
+env/
+.env
+.env.local
+.env.*.local
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.iml
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# Project-specific
+pipeline.log
+*.log
+
+# Output/Artifacts - should NOT be committed
+/outputs/
+/predictions/
+/reports/
+models/checkpoints/
+*.xlsx
+*.csv
+/data/raw/
+/data/processed/
+
+# Credentials & sensitive data
+.env
+secrets.json
+credentials.json
+
+# Keep these important files
+!.gitkeep
+!requirements.txt
+!setup.py
