@@ -8,18 +8,18 @@ SCEN_COLS = ["Forecast", "Forecast_Lo", "Forecast_Hi"]
 COUNTRY_TOTAL_KEY = "_TOTAL"
 
 def _mark_country(df: pd.DataFrame) -> pd.Series:
-    r = df["Region"].astype(str)
-    return r.eq(COUNTRY_TOTAL_KEY)
+    r = df["Region"].astype(str).str.upper()
+    return r.eq(COUNTRY_TOTAL_KEY) | r.eq("ALL") | r.eq("TOTAL")
 
 def add_country_totals(df: pd.DataFrame) -> pd.DataFrame:
-    """Create country totals as sum of regions per Date."""
+    """If no country total exists, create one as sum of regions per Date."""
     if df.empty:
         return df
     existing_cols = [c for c in SCEN_COLS if c in df.columns]
     if not existing_cols:
         return df
     
-    # Check if _TOTAL already exists
+    # Check if country total already exists
     if _mark_country(df).any():
         return df
 

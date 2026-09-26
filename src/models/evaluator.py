@@ -68,13 +68,16 @@ MODEL_DIRS: Dict[str, Path] = {
     "SARIMA_auto":                OUT_DIR/"Models"/"Model06_SARIMA",
     "XGBoost_Lags":               OUT_DIR/"Models"/"Model07_XGBoost",
     "LSTM_Univariate":            OUT_DIR/"Models"/"Model08_LSTM",
+    "Global_LightGBM":            OUT_DIR/"Models"/"Model10_Global_LGBM",
     "Ensemble_Weighted_AntiFlat": OUT_DIR/"Models"/"Model09_Ensemble",
 }
 
 HOLDOUT_MONTHS    = 3
-MIN_SERIES_LEN    = 24
-MIN_HOLDOUT_ROWS  = 2
+MIN_SERIES_LEN    = 12  # Support emerging branches with >= 12 months of data
+MATURE_SERIES_LEN = 24  # Threshold for full heavy-model competition
 FALLBACK_TAIL_M   = 12  # allow a longer overlap check if strict window is too short
+MIN_HOLDOUT_ROWS  = 2   # minimum months of overlap required for scoring
+TIER1_MODELS      = {"LastYear_MoM", "AvgMonthly_MoM", "Rolling_MoM", "Global_LightGBM"}
 
 def _load_backtests() -> Dict[str, pd.DataFrame]:
     bt: Dict[str, pd.DataFrame] = {}
@@ -146,7 +149,14 @@ def main() -> None:
             .loc[:, ["Date","Value"]].rename(columns={"Value":"Actual"})
         )
 
+        is_emerging = (srow["n"] < MATURE_SERIES_LEN)
         for mdl_name, bt in bt_all.items():
+            if is_emerging and mdl_name not in TIER1_MODELS:
+                # Gating: Emerging series with <24 months only compete with low-parameter baselines & Global LightGBM
+                drop_notes.append({"Country": c, "Region": r, "Metric": metr,
+                                   "Model": mdl_name, "Reason": f"Emerging series gating (n={srow['n']} < {MATURE_SERIES_LEN})"})
+                continue
+
             if bt is None or bt.empty:
                 drop_notes.append({"Country": c, "Region": r, "Metric": metr,
                                    "Model": mdl_name, "Reason": "No backtest"})
@@ -176,19 +186,83 @@ def main() -> None:
                                    "Reason": "Insufficient overlap (strict<2 and fallback<2)"})
                 continue
 
-            a = merged["Actual"].to_numpy(dtype=float)
-            f = merged["Pred"].to_numpy(dtype=float)
-            mae   = float(np.mean(np.abs(a - f)))
-            smape = _smape(a, f)
+            # ── 3-Test Tournament Scoring: Peak, Normal, and Low Regimes ──
+            hist_vals = series_hist["Value"].to_numpy(dtype=float)
+            p33 = float(np.percentile(hist_vals, 33.3)) if len(hist_vals) >= 3 else float(np.min(hist_vals))
+            p67 = float(np.percentile(hist_vals, 66.7)) if len(hist_vals) >= 3 else float(np.max(hist_vals))
+            if p33 >= p67:
+                p33 = float(np.min(hist_vals))
+                p67 = float(np.max(hist_vals))
+
+            merged["Actual"] = merged["Actual"].astype(float)
+            merged["Pred"] = merged["Pred"].astype(float)
+            merged["Error"] = np.abs(merged["Actual"] - merged["Pred"])
+
+            # Overall metrics
+            mae_overall = float(merged["Error"].mean())
+            smape_overall = _smape(merged["Actual"].to_numpy(), merged["Pred"].to_numpy())
+
+            # Regime splits based on volume
+            peak_mask = merged["Actual"] >= p67
+            low_mask  = merged["Actual"] <= p33
+            norm_mask = (~peak_mask) & (~low_mask)
+
+            # Test 1: Peak / High-Volume Regime
+            if peak_mask.any():
+                peak_sub = merged[peak_mask]
+                mae_peak = float(peak_sub["Error"].mean())
+                smape_peak = _smape(peak_sub["Actual"].to_numpy(), peak_sub["Pred"].to_numpy())
+                n_peak = int(peak_mask.sum())
+            else:
+                mae_peak = mae_overall
+                smape_peak = smape_overall
+                n_peak = 0
+
+            # Test 2: Normal / Baseline Regime
+            if norm_mask.any():
+                norm_sub = merged[norm_mask]
+                mae_norm = float(norm_sub["Error"].mean())
+                smape_norm = _smape(norm_sub["Actual"].to_numpy(), norm_sub["Pred"].to_numpy())
+                n_norm = int(norm_mask.sum())
+            else:
+                mae_norm = mae_overall
+                smape_norm = smape_overall
+                n_norm = 0
+
+            # Test 3: Low-Volume / Off-Peak Regime
+            if low_mask.any():
+                low_sub = merged[low_mask]
+                mae_low = float(low_sub["Error"].mean())
+                smape_low = _smape(low_sub["Actual"].to_numpy(), low_sub["Pred"].to_numpy())
+                n_low = int(low_mask.sum())
+            else:
+                mae_low = mae_overall
+                smape_low = smape_overall
+                n_low = 0
+
+            # Weighted Decathlon Score: 40% Peak + 35% Normal + 25% Low
+            decathlon_score = 0.40 * mae_peak + 0.35 * mae_norm + 0.25 * mae_low
+
             rows_scores.append({
                 "Country": c, "Region": r, "Metric": metr, "Model": mdl_name,
                 "Holdout_N": int(len(merged)),
-                "MAE": mae,
-                "sMAPE": smape,
+                "MAE": mae_overall,
+                "sMAPE": smape_overall,
+                "MAE_Peak": mae_peak,
+                "sMAPE_Peak": smape_peak,
+                "N_Peak": n_peak,
+                "MAE_Normal": mae_norm,
+                "sMAPE_Normal": smape_norm,
+                "N_Normal": n_norm,
+                "MAE_Low": mae_low,
+                "sMAPE_Low": smape_low,
+                "N_Low": n_low,
+                "Decathlon_Score": decathlon_score,
             })
 
     scores_df = pd.DataFrame(rows_scores)
     scores_df.to_csv(EVAL_DIR/"holdout_series_scores_all.csv", index=False)
+    scores_df.to_csv(EVAL_DIR/"tournament_3test_scores.csv", index=False)
 
     if drop_notes:
         pd.DataFrame(drop_notes).to_csv(EVAL_DIR/"_selection_notes_all.csv", index=False)
@@ -202,47 +276,92 @@ def main() -> None:
     scores_df[scores_df["Metric"] == "Received"].to_csv(EVAL_DIR/"series_scores_received.csv", index=False)
     scores_df[scores_df["Metric"] == "Submitted"].to_csv(EVAL_DIR/"series_scores_submitted.csv", index=False)
 
-    # 3) Winners per (Country, Region) calculated independently per metric
-    winners_rec = (
+    # 3) Winners per (Country, Region) calculated independently via 3-Test Decathlon Score
+    best_rec = (
         scores_df[scores_df["Metric"] == "Received"]
-                 .sort_values(["Country","Region","MAE","sMAPE","Model"])
-                 .groupby(["Country","Region"], as_index=False)
-                 .first()[["Country","Region","Model"]]
-                 .rename(columns={"Model":"Best_Model_Received"})
+        .sort_values(["Country", "Region", "Decathlon_Score", "sMAPE", "Model"])
+        .groupby(["Country", "Region"], as_index=False)
+        .first()
     )
-    winners_sub = (
+    best_rec["Selection_Reason"] = best_rec.apply(
+        lambda x: f"Decathlon Winner (Score: {x['Decathlon_Score']:.1f} | Peak: {x['MAE_Peak']:.1f}, Norm: {x['MAE_Normal']:.1f}, Low: {x['MAE_Low']:.1f})",
+        axis=1
+    )
+    rec_winners = best_rec[["Country", "Region", "Model", "Decathlon_Score", "MAE_Peak", "MAE_Normal", "MAE_Low", "Selection_Reason"]].rename(
+        columns={
+            "Model": "Best_Model_Received",
+            "Decathlon_Score": "Decathlon_Score_Rec",
+            "MAE_Peak": "Peak_MAE_Rec",
+            "MAE_Normal": "Norm_MAE_Rec",
+            "MAE_Low": "Low_MAE_Rec",
+            "Selection_Reason": "Selection_Reason_Received"
+        }
+    )
+
+    best_sub = (
         scores_df[scores_df["Metric"] == "Submitted"]
-                 .sort_values(["Country","Region","MAE","sMAPE","Model"])
-                 .groupby(["Country","Region"], as_index=False)
-                 .first()[["Country","Region","Model"]]
-                 .rename(columns={"Model":"Best_Model_Submitted"})
+        .sort_values(["Country", "Region", "Decathlon_Score", "sMAPE", "Model"])
+        .groupby(["Country", "Region"], as_index=False)
+        .first()
     )
-    # Outer join so we have columns Best_Model_Received and Best_Model_Submitted
-    winners = pd.merge(winners_rec, winners_sub, on=["Country","Region"], how="outer")
+    best_sub["Selection_Reason"] = best_sub.apply(
+        lambda x: f"Decathlon Winner (Score: {x['Decathlon_Score']:.1f} | Peak: {x['MAE_Peak']:.1f}, Norm: {x['MAE_Normal']:.1f}, Low: {x['MAE_Low']:.1f})",
+        axis=1
+    )
+    sub_winners = best_sub[["Country", "Region", "Model", "Decathlon_Score", "MAE_Peak", "MAE_Normal", "MAE_Low", "Selection_Reason"]].rename(
+        columns={
+            "Model": "Best_Model_Submitted",
+            "Decathlon_Score": "Decathlon_Score_Sub",
+            "MAE_Peak": "Peak_MAE_Sub",
+            "MAE_Normal": "Norm_MAE_Sub",
+            "MAE_Low": "Low_MAE_Sub",
+            "Selection_Reason": "Selection_Reason_Submitted"
+        }
+    )
+
+    winners = pd.merge(rec_winners, sub_winners, on=["Country", "Region"], how="outer")
     winners.to_csv(EVAL_DIR/"series_selection.csv", index=False)
 
-    # TL;DR on Received (for backward compatible table printing)
+    # TL;DR Decathlon Leaderboard on Received
     summary_rec = (
         scores_df[scores_df["Metric"] == "Received"]
         .groupby("Model", as_index=False)
         .agg(
-            Series_Won=("MAE", "count"),
-            Med_MAE=("MAE","median"),
-            Med_sMAPE=("sMAPE","median")
+            Series_Won=("Decathlon_Score", "count"),
+            Med_Decathlon=("Decathlon_Score", "median"),
+            Med_Peak_MAE=("MAE_Peak", "median"),
+            Med_Norm_MAE=("MAE_Normal", "median"),
+            Med_Low_MAE=("MAE_Low", "median"),
+            Med_sMAPE=("sMAPE", "median")
         )
-        .sort_values(["Med_MAE","Med_sMAPE","Model"])
+        .sort_values(["Med_Decathlon", "Med_sMAPE", "Model"])
     )
 
-    tbl = Table(title="Evaluator TL;DR — per-series (Received)", pad_edge=False)
-    tbl.add_column("Model"); tbl.add_column("Series Won", justify="right")
-    tbl.add_column("Median MAE", justify="right"); tbl.add_column("Median sMAPE", justify="right")
+    tbl = Table(title="🏆 Tournament Decathlon Leaderboard — 3-Test Regime (Received)", pad_edge=False)
+    tbl.add_column("Model")
+    tbl.add_column("Series Evaluated", justify="right")
+    tbl.add_column("Decathlon Score", justify="right")
+    tbl.add_column("Peak MAE", justify="right")
+    tbl.add_column("Normal MAE", justify="right")
+    tbl.add_column("Low MAE", justify="right")
+    tbl.add_column("Median sMAPE", justify="right")
     for _, row in summary_rec.iterrows():
-        tbl.add_row(row.Model, f"{int(row.Series_Won)}",
-                    f"{row.Med_MAE:,.2f}", f"{row.Med_sMAPE:.2f}%")
+        tbl.add_row(
+            row.Model,
+            f"{int(row.Series_Won)}",
+            f"{row.Med_Decathlon:,.2f}",
+            f"{row.Med_Peak_MAE:,.2f}",
+            f"{row.Med_Norm_MAE:,.2f}",
+            f"{row.Med_Low_MAE:,.2f}",
+            f"{row.Med_sMAPE:.2f}%"
+        )
     console.print(tbl)
-    (EVAL_DIR/"tldr_series_received.txt").write_text(tbl.__str__())
-    logging.info("Evaluator completed series-level selection independently on Received and Submitted metrics.")
-    console.print(f"[bold green]✅ Series selection complete → {EVAL_DIR/'series_selection.csv'}[/]")
+    try:
+        (EVAL_DIR/"tldr_tournament_decathlon.txt").write_text(tbl.__str__(), encoding="utf-8")
+    except Exception:
+        pass
+    logging.info("Evaluator completed 3-Test Tournament (Peak, Normal, Low) selection independently on Received and Submitted.")
+    console.print(f"[bold green]✅ 3-Test Decathlon Tournament complete → {EVAL_DIR/'series_selection.csv'}[/]")
 
 if __name__ == "__main__":
     main()

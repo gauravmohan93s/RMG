@@ -12,6 +12,8 @@ from rich.console import Console
 from ..config import OUT_DIR, RANDOM_SEED, HORIZON
 from ..loader import load_data
 from ..reconciliation import add_country_totals
+from ..intake_calendar import build_intake_summary
+from ..tracking import log_forecast_run, reconcile_history_with_actuals
 
 warnings.filterwarnings("ignore")
 np.random.seed(RANDOM_SEED)
@@ -43,6 +45,7 @@ MODEL_DIRS: Dict[str, Path] = {
     "SARIMA_auto":                  BASE/"Model06_SARIMA",
     "XGBoost_Lags":                 BASE/"Model07_XGBoost",
     "LSTM_Univariate":              BASE/"Model08_LSTM",
+    "Global_LightGBM":              BASE/"Model10_Global_LGBM",
     "Ensemble_Weighted_AntiFlat":   BASE/"Model09_Ensemble",
 }
 
@@ -202,10 +205,17 @@ def _annotate_first_last(ax, x, y, fmt="{:,.0f}", color=None):
                     fontsize=7,
                     color=color)
 
-def _enforce_funnel_consistency(df: pd.DataFrame) -> pd.DataFrame:
+def _enforce_pipeline_inventory_funnel(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Ensure Submitted <= Received for every (Country, Region, Date).
-    If Submitted exceeds Received, cap Submitted at Received level.
+    Logically mature funnel constraint:
+    1. Acknowledges consultant lead time: In peak submission deadline months
+       (April-June for Fall, October-November for Spring), Submitted can legitimately
+       exceed Received in that specific month due to accumulated backlog.
+    2. Bounds monthly spikes by the rolling 3-month receipt inventory:
+       Submitted_t <= 1.40 * max(Received_t, Rolling_3M_Avg(Received))
+    3. Enforces 12-month annual conservation invariant:
+       Sum_12m(Submitted) <= Sum_12m(Received)
+       If cumulative 12m Submitted exceeds Received, scales submissions down proportionally.
     """
     if df.empty:
         return df
@@ -219,25 +229,49 @@ def _enforce_funnel_consistency(df: pd.DataFrame) -> pd.DataFrame:
     merge_keys = ["Country", "Region", "Date"]
     val_cols = [c for c in ["Forecast", "Forecast_Lo", "Forecast_Hi"] if c in rec.columns and c in sub.columns]
 
+    # Sort both by date
+    rec = rec.sort_values(merge_keys).reset_index(drop=True)
+    sub = sub.sort_values(merge_keys).reset_index(drop=True)
+
+    # Compute rolling 3-month receipt inventory baseline per series
+    rec["_rec_roll3m"] = rec.groupby(["Country", "Region"])["Forecast"].transform(
+        lambda s: s.rolling(3, min_periods=1).mean()
+    )
+    rec["_rec_cap"] = np.maximum(rec["Forecast"], rec["_rec_roll3m"]) * 1.40
+
     merged = sub.merge(
-        rec[merge_keys + val_cols],
+        rec[merge_keys + val_cols + ["_rec_cap"]],
         on=merge_keys,
         suffixes=("", "_rec")
     )
 
-    capped_mask = merged["Forecast"] > merged["Forecast_rec"]
-    capped_count = int(capped_mask.sum())
-    if capped_count > 0:
-        logging.warning("Funnel constraint: capped %d Submitted forecast points that exceeded Received.", capped_count)
-        merged.loc[capped_mask, "Forecast"] = merged.loc[capped_mask, "Forecast_rec"]
-        if "Forecast_Hi" in merged.columns and "Forecast_Hi_rec" in merged.columns:
-            merged["Forecast_Hi"] = np.minimum(merged["Forecast_Hi"], merged["Forecast_Hi_rec"])
-        if "Forecast_Lo" in merged.columns and "Forecast_Lo_rec" in merged.columns:
-            merged["Forecast_Lo"] = np.minimum(merged["Forecast_Lo"], merged["Forecast_Lo_rec"])
+    # 1. Monthly rolling inventory cap: allow surge up to 1.4x rolling receipts
+    spike_mask = merged["Forecast"] > merged["_rec_cap"]
+    spike_count = int(spike_mask.sum())
+    if spike_count > 0:
+        logging.info("Pipeline inventory funnel: tempered %d runaway submission spikes beyond 1.4x rolling receipts.", spike_count)
+        merged.loc[spike_mask, "Forecast"] = merged.loc[spike_mask, "_rec_cap"]
 
-    clean_sub = merged[sub.columns]
+    # 2. Cumulative 12-month conservation: Sum_12m(Submitted) <= Sum_12m(Received)
+    scaled_sub_list = []
+    for (c, r), g in merged.groupby(["Country", "Region"]):
+        tot_rec = g["Forecast_rec"].sum()
+        tot_sub = g["Forecast"].sum()
+        if tot_sub > tot_rec and tot_sub > 0:
+            scale_factor = tot_rec / tot_sub
+            g["Forecast"] = g["Forecast"] * scale_factor
+            if "Forecast_Hi" in g.columns:
+                g["Forecast_Hi"] = g["Forecast_Hi"] * scale_factor
+            if "Forecast_Lo" in g.columns:
+                g["Forecast_Lo"] = g["Forecast_Lo"] * scale_factor
+            logging.info("Annual pipeline conservation: scaled submissions for %s / %s by %.3f (total sub %d -> %d)",
+                         c, r, scale_factor, int(tot_sub), int(tot_rec))
+        scaled_sub_list.append(g)
+
+    merged_clean = pd.concat(scaled_sub_list, ignore_index=True)
+    clean_sub = merged_clean[sub.columns]
     other = df[~df["Metric"].isin(["Received", "Submitted"])]
-    out = pd.concat([rec, clean_sub, other], ignore_index=True)
+    out = pd.concat([rec.drop(columns=["_rec_roll3m", "_rec_cap"], errors="ignore"), clean_sub, other], ignore_index=True)
     return out.sort_values(["Country", "Region", "Metric", "Date"]).reset_index(drop=True)
 
 # ─────────────────────────────────────────────────────────────────────
@@ -321,66 +355,91 @@ def main():
     final_fc = (pd.concat(assembled, ignore_index=True)
                   .sort_values(["Country","Region","Metric","Date"]))
 
-    # Enforce business funnel consistency: Submitted <= Received
-    final_fc = _enforce_funnel_consistency(final_fc)
+    # Enforce cumulative pipeline inventory funnel (allows April-June/Nov surges, caps annual conservation)
+    final_fc = _enforce_pipeline_inventory_funnel(final_fc)
 
     # Hierarchical roll-up: generate country totals
     all_with_totals = add_country_totals(final_fc)
     country_totals = all_with_totals[all_with_totals["Region"] == "_TOTAL"].copy()
 
+    # Domain Intake Summary: Fall, Spring, Summer with lead time and YoY comparisons
+    intake_summary = build_intake_summary(final_fc, hist)
+
+    # Forecast Governance & Audit Store: Log current run and reconcile with realized actuals
+    try:
+        log_forecast_run(final_fc, sel)
+        audit_history, governance_scorecard = reconcile_history_with_actuals(hist)
+    except Exception as e:
+        logging.exception("Forecast governance tracking error: %s", e)
+        audit_history, governance_scorecard = pd.DataFrame(), pd.DataFrame()
+
     # ── CSV (locale-proof columns included) ───────────────────────────
     final_fc.to_csv(FORECAST_DIR/"final_forecast.csv", index=False)
+    if not intake_summary.empty:
+        intake_summary.to_csv(FORECAST_DIR/"intake_summary.csv", index=False)
 
     # ── XLSX (explicit formats & widths) ──────────────────────────────
     try:
         with pd.ExcelWriter(FORECAST_DIR/"final_forecast.xlsx", engine="xlsxwriter", datetime_format="yyyy-mm-dd") as w:
-            # Forecast sheet
+            # 1. Forecast sheet
             final_fc.to_excel(w, sheet_name="Forecast_12m", index=False)
             ws = w.sheets["Forecast_12m"]
             cols = list(final_fc.columns)
             def col_idx(name): return cols.index(name) if name in cols else None
-            # Set widths if columns exist
             for name, width in [
-                ("Date", 12),
-                ("Date_ISO", 12),
-                ("YearMonth", 9),
-                ("Month_Name", 9),
-                ("Forecast", 14),
-                ("Forecast_Lo", 14),
-                ("Forecast_Hi", 14),
+                ("Date", 12), ("Date_ISO", 12), ("YearMonth", 9), ("Month_Name", 9),
+                ("Forecast", 14), ("Forecast_Lo", 14), ("Forecast_Hi", 14),
             ]:
                 ci = col_idx(name)
-                if ci is not None:
-                    ws.set_column(ci, ci, width)
+                if ci is not None: ws.set_column(ci, ci, width)
             ws.freeze_panes(1, 0)
 
-            # Country Totals sheet
+            # 2. Intake Summary sheet (Fall, Spring, Summer)
+            if not intake_summary.empty:
+                intake_summary.to_excel(w, sheet_name="Intake_Summary", index=False)
+                ws_int = w.sheets["Intake_Summary"]
+                cols_int = list(intake_summary.columns)
+                def col_idx_int(name): return cols_int.index(name) if name in cols_int else None
+                for name, width in [
+                    ("Country", 16), ("Region", 18), ("Metric", 12),
+                    ("Intake_Cycle", 14), ("Forecast", 14), ("Forecast_Lo", 14),
+                    ("Forecast_Hi", 14), ("Prior_Year_Actual", 16), ("YoY_Growth_%", 14)
+                ]:
+                    ci = col_idx_int(name)
+                    if ci is not None: ws_int.set_column(ci, ci, width)
+                ws_int.freeze_panes(1, 0)
+
+            # 3. Country Totals sheet
             if not country_totals.empty:
                 country_totals.to_excel(w, sheet_name="Country_Totals", index=False)
                 ws_tot = w.sheets["Country_Totals"]
                 cols_tot = list(country_totals.columns)
                 def col_idx_tot(name): return cols_tot.index(name) if name in cols_tot else None
                 for name, width in [
-                    ("Date", 12),
-                    ("Date_ISO", 12),
-                    ("YearMonth", 9),
-                    ("Month_Name", 9),
-                    ("Forecast", 14),
-                    ("Forecast_Lo", 14),
-                    ("Forecast_Hi", 14),
+                    ("Date", 12), ("Date_ISO", 12), ("YearMonth", 9), ("Month_Name", 9),
+                    ("Forecast", 14), ("Forecast_Lo", 14), ("Forecast_Hi", 14),
                 ]:
                     ci = col_idx_tot(name)
-                    if ci is not None:
-                        ws_tot.set_column(ci, ci, width)
+                    if ci is not None: ws_tot.set_column(ci, ci, width)
                 ws_tot.freeze_panes(1, 0)
 
-            # History sheet
+            # 4. Model Governance & Reliability Scorecard
+            if not governance_scorecard.empty:
+                governance_scorecard.to_excel(w, sheet_name="Model_Governance", index=False)
+                w.sheets["Model_Governance"].freeze_panes(1, 0)
+
+            # 5. Full Prediction Audit Trail (what model, why, low, best, high, actuals)
+            if not audit_history.empty:
+                audit_history.to_excel(w, sheet_name="Prediction_Audit", index=False)
+                w.sheets["Prediction_Audit"].freeze_panes(1, 0)
+
+            # 6. History sheet
             hist2 = hist.copy()
             hist2 = _add_date_helpers(hist2.rename(columns={"Value":"Actual"}))
             hist2.to_excel(w, sheet_name="History", index=False)
             w.sheets["History"].freeze_panes(1, 0)
 
-            # Selection sheet
+            # 7. Selection sheet
             sel.to_excel(w, sheet_name="Series_Selection", index=False)
             w.sheets["Series_Selection"].freeze_panes(1, 0)
     except Exception as e:

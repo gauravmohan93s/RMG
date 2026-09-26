@@ -40,7 +40,7 @@ ENABLE_LLM    = os.environ.get("RMG_ENABLE_LLM", "0").lower() in {"1", "true", "
 OLLAMA_URL    = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL  = os.environ.get("OLLAMA_MODEL", "phi3:mini")   # or qwen2:0.5b
 OLLAMA_TIMEOUT_S = float(os.environ.get("OLLAMA_TIMEOUT_S", "4.0"))  # keep short for speed
-LLM_CACHE     = OUT_DIR / "Reports" / "llm_cache.json"
+LLM_CACHE        = REPORT_DIR / "llm_cache.json"
 
 # ----------------------------- utils / IO -----------------------------
 def _safe(s: str) -> str:

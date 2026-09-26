@@ -56,10 +56,11 @@ GROUP1     = {
     "Model04_AvgMoM":   BASE / "Model04_AvgMoM",
 }
 GROUP2     = {
-    "Model05_Prophet":  BASE / "Model05_Prophet_Fast",
-    "Model06_SARIMA":   BASE / "Model06_SARIMA",
-    "Model07_XGBoost":  BASE / "Model07_XGBoost",
-    "Model08_LSTM":     BASE / "Model08_LSTM",
+    "Model05_Prophet":      BASE / "Model05_Prophet_Fast",
+    "Model06_SARIMA":       BASE / "Model06_SARIMA",
+    "Model07_XGBoost":      BASE / "Model07_XGBoost",
+    "Model08_LSTM":         BASE / "Model08_LSTM",
+    "Model10_Global_LGBM":  BASE / "Model10_Global_LGBM",
 }
 ALL_MODELS = {**GROUP1, **GROUP2}
 

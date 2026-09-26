@@ -169,21 +169,15 @@ def main() -> None:
 
         # ----------------- STRICT OSS BACKTEST (last K months) -----------------
         y_train, oss_idx = _split_oss(y, OSS_MONTHS)
-        bt_rows = []
-        for t in oss_idx:
-            # train strictly up to t-1 (no leakage)
-            hist = y.loc[:t - pd.offsets.MonthBegin()]
-            if hist.empty:
-                continue
-
+        if len(y_train) >= 6 and len(oss_idx) > 0:
             use_exog = bool(ENABLE_EXOG and ex_cols_all)
             if use_exog:
-                X_train, use_cols = _build_exog_slice(df, ex_cols_all, cty, reg, hist.index)
+                X_train, use_cols = _build_exog_slice(df, ex_cols_all, cty, reg, y_train.index)
                 use_exog = bool(use_cols)
             else:
-                X_train, use_cols = pd.DataFrame(index=hist.index), []
+                X_train, use_cols = pd.DataFrame(index=y_train.index), []
 
-            base = pd.DataFrame({"ds": hist.index, "y": hist.values})
+            base = pd.DataFrame({"ds": y_train.index, "y": y_train.values})
             m = _new_prophet()
             if use_exog:
                 for c in use_cols:
@@ -195,24 +189,28 @@ def main() -> None:
             except TypeError:
                 m.fit(base)
 
-            future = pd.DataFrame({"ds": [t]})
+            future = pd.DataFrame({"ds": oss_idx})
             if use_exog:
-                last_vals = X_train.iloc[-1]
-                for c in use_cols:
-                    future[c] = last_vals.get(c, 0.0)
+                X_future = pd.DataFrame(index=oss_idx, columns=use_cols, dtype=float)
+                X_future = pd.concat([X_train[use_cols], X_future]).ffill().loc[oss_idx]
+                future = future.join(X_future.reset_index(drop=True))
 
             pred = m.predict(future)
-            raw_next = max(0.0, float(pred["yhat"].iloc[0]))
-            prev_level = float(hist.iloc[-1])
-            yhat = _clip_step(prev_level, raw_next, lo_step, hi_step)
+            raw_preds = np.maximum(0.0, pred["yhat"].to_numpy(dtype=float))
 
-            bt_rows.append({
+            level = float(y_train.iloc[-1])
+            clamped = []
+            for val in raw_preds:
+                step = _clip_step(level, val, lo_step, hi_step)
+                clamped.append(step)
+                level = max(1e-9, step)
+
+            back = pd.DataFrame({
                 "Country": cty, "Region": reg, "Metric": metr,
-                "Date": t, "Actual": float(y.loc[t]), "Pred": float(yhat)
+                "Date": oss_idx,
+                "Actual": y.loc[oss_idx].values,
+                "Pred": np.array(clamped, dtype=float)
             })
-
-        back = pd.DataFrame(bt_rows)
-        if not back.empty:
             back["Date"] = pd.to_datetime(back["Date"]).dt.to_period("M").dt.to_timestamp(how="S")
             records_back.append(back)
 

@@ -199,9 +199,9 @@ def main() -> None:
                 model_oss = pm.auto_arima(
                     y_train, X=X_train if use_exog else None,
                     seasonal=True, m=12,
-                    start_p=0, start_q=0, max_p=3, max_q=3,
+                    start_p=1, start_q=1, max_p=2, max_q=2,
                     d=d_hint, D=1,
-                    start_P=0, start_Q=0, max_P=2, max_Q=2,
+                    start_P=1, start_Q=0, max_P=1, max_Q=1,
                     information_criterion="aicc",
                     trace=False, error_action="ignore",
                     suppress_warnings=True, stepwise=True,
@@ -257,9 +257,9 @@ def main() -> None:
             model_full = pm.auto_arima(
                 y, X=X_full if use_exog_full else None,
                 seasonal=True, m=12,
-                start_p=0, start_q=0, max_p=3, max_q=3,
+                start_p=1, start_q=1, max_p=2, max_q=2,
                 d=d_hint_full, D=1,
-                start_P=0, start_Q=0, max_P=2, max_Q=2,
+                start_P=1, start_Q=0, max_P=1, max_Q=1,
                 information_criterion="aicc",
                 trace=False, error_action="ignore",
                 suppress_warnings=True, stepwise=True,

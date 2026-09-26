@@ -80,7 +80,10 @@ def _discover_models() -> List[str]:
     mods = []
     for p in sorted(MODELS_DIR.glob("model[0-9][0-9]_*.py")):
         mods.append(f"src.models.{p.stem}")
-    return mods
+    # Ensure ensemble runs after all base models so it can consume their predictions
+    ensemble = [m for m in mods if "ensemble" in m.lower()]
+    others = [m for m in mods if "ensemble" not in m.lower()]
+    return others + ensemble
 
 def _filter_models(mods: List[str], only: Optional[str], exclude: Optional[str]) -> List[str]:
     """Filter model module list by comma-separated short names (from file stems)."""
