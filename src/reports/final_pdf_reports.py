@@ -387,8 +387,41 @@ def _country_story(flow: List, styles: ReportStyles,
                    selection: pd.DataFrame) -> None:
     # Header
     flow.append(Paragraph(f"{country} — Forecast Report (LLM-assisted)", styles.h1))
-    flow.append(Paragraph("Evaluation: strict 3-month holdout. Forecast horizon: next 12 months. Bands show uncertainty.", styles.small))
+    flow.append(Paragraph("Evaluation: 3-Test Decathlon Tournament. Horizon: next 12 months. Scenarios: Baseline vs Policy Adjusted.", styles.small))
     flow.append(Spacer(0, 4))
+
+    # Visa & Immigration Policy Context
+    try:
+        from ..policy_matrix import get_policy_matrix
+        pol_df = get_policy_matrix()
+        c_pol = pol_df[pol_df["Country"] == country]
+        if not c_pol.empty:
+            p_row = c_pol.iloc[0]
+            mult = float(p_row["Policy_Multiplier"])
+            risk = str(p_row["Risk_Level"])
+            ctx  = str(p_row["Regulatory_Context"])
+            diff_pct = (mult - 1.0) * 100.0
+            diff_str = f"+{diff_pct:.0f}%" if diff_pct > 0 else f"{diff_pct:.0f}%"
+            pol_banner = [
+                [f"Visa & Immigration Policy Status: {risk}", f"Regulatory Factor: {mult:.2f}x ({diff_str})"],
+                [f"Key Policy Driver: {ctx}", ""]
+            ]
+            t_pol = Table(pol_banner, colWidths=[12.5*cm, 5.5*cm])
+            bg_col = colors.HexColor("#FDF2E9") if mult < 1.0 else (colors.HexColor("#EAF2F8") if mult > 1.0 else colors.HexColor("#F4F6F7"))
+            bd_col = colors.HexColor("#DC7633") if mult < 1.0 else (colors.HexColor("#5499C7") if mult > 1.0 else colors.HexColor("#BDC3C7"))
+            t_pol.setStyle(TableStyle([
+                ("FONT", (0,0), (-1,-1), "Helvetica", 7.5),
+                ("FONT", (0,0), (0,0), "Helvetica-Bold", 8),
+                ("BACKGROUND", (0,0), (-1,-1), bg_col),
+                ("BOX", (0,0), (-1,-1), 0.5, bd_col),
+                ("SPAN", (0,1), (1,1)),
+                ("TOPPADDING", (0,0), (-1,-1), 2),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 2),
+            ]))
+            flow.append(t_pol)
+            flow.append(Spacer(0, 4))
+    except Exception:
+        pass
 
     # Chosen model map for each region (Received-based)
     if not selection.empty:

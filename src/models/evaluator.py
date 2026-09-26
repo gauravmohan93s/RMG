@@ -69,6 +69,7 @@ MODEL_DIRS: Dict[str, Path] = {
     "XGBoost_Lags":               OUT_DIR/"Models"/"Model07_XGBoost",
     "LSTM_Univariate":            OUT_DIR/"Models"/"Model08_LSTM",
     "Global_LightGBM":            OUT_DIR/"Models"/"Model10_Global_LGBM",
+    "Croston_TSB_Intermittent":   OUT_DIR/"Models"/"Model11_Croston_TSB",
     "Ensemble_Weighted_AntiFlat": OUT_DIR/"Models"/"Model09_Ensemble",
 }
 
@@ -77,7 +78,7 @@ MIN_SERIES_LEN    = 12  # Support emerging branches with >= 12 months of data
 MATURE_SERIES_LEN = 24  # Threshold for full heavy-model competition
 FALLBACK_TAIL_M   = 12  # allow a longer overlap check if strict window is too short
 MIN_HOLDOUT_ROWS  = 2   # minimum months of overlap required for scoring
-TIER1_MODELS      = {"LastYear_MoM", "AvgMonthly_MoM", "Rolling_MoM", "Global_LightGBM"}
+TIER1_MODELS      = {"LastYear_MoM", "AvgMonthly_MoM", "Rolling_MoM", "Global_LightGBM", "Croston_TSB_Intermittent"}
 
 def _load_backtests() -> Dict[str, pd.DataFrame]:
     bt: Dict[str, pd.DataFrame] = {}

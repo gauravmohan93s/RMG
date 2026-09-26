@@ -46,8 +46,11 @@ MODEL_DIRS: Dict[str, Path] = {
     "XGBoost_Lags":                 BASE/"Model07_XGBoost",
     "LSTM_Univariate":              BASE/"Model08_LSTM",
     "Global_LightGBM":              BASE/"Model10_Global_LGBM",
+    "Croston_TSB_Intermittent":     BASE/"Model11_Croston_TSB",
     "Ensemble_Weighted_AntiFlat":   BASE/"Model09_Ensemble",
 }
+
+from ..policy_matrix import apply_policy_scenarios, get_policy_matrix
 
 def _safe(s: str) -> str:
     return re.sub(r'[\/:*?"<>|]', "_", str(s))
@@ -358,6 +361,10 @@ def main():
     # Enforce cumulative pipeline inventory funnel (allows April-June/Nov surges, caps annual conservation)
     final_fc = _enforce_pipeline_inventory_funnel(final_fc)
 
+    # Apply Visa Policy & Regulatory Scenarios (Headwinds / Tailwinds)
+    final_fc = apply_policy_scenarios(final_fc)
+    policy_matrix = get_policy_matrix()
+
     # Hierarchical roll-up: generate country totals
     all_with_totals = add_country_totals(final_fc)
     country_totals = all_with_totals[all_with_totals["Region"] == "_TOTAL"].copy()
@@ -389,6 +396,8 @@ def main():
             for name, width in [
                 ("Date", 12), ("Date_ISO", 12), ("YearMonth", 9), ("Month_Name", 9),
                 ("Forecast", 14), ("Forecast_Lo", 14), ("Forecast_Hi", 14),
+                ("Policy_Multiplier", 15), ("Regulatory_Risk", 18),
+                ("Forecast_Policy_Adjusted", 20), ("Forecast_Conservative", 18), ("Forecast_Aggressive", 18),
             ]:
                 ci = col_idx(name)
                 if ci is not None: ws.set_column(ci, ci, width)
@@ -409,7 +418,17 @@ def main():
                     if ci is not None: ws_int.set_column(ci, ci, width)
                 ws_int.freeze_panes(1, 0)
 
-            # 3. Country Totals sheet
+            # 3. Policy Scenarios sheet (Regulatory Headwinds & Tailwinds Matrix)
+            if not policy_matrix.empty:
+                policy_matrix.to_excel(w, sheet_name="Policy_Scenarios", index=False)
+                ws_pol = w.sheets["Policy_Scenarios"]
+                ws_pol.freeze_panes(1, 0)
+                ws_pol.set_column(0, 0, 18)
+                ws_pol.set_column(1, 1, 16)
+                ws_pol.set_column(2, 2, 22)
+                ws_pol.set_column(3, 3, 70)
+
+            # 4. Country Totals sheet
             if not country_totals.empty:
                 country_totals.to_excel(w, sheet_name="Country_Totals", index=False)
                 ws_tot = w.sheets["Country_Totals"]
@@ -418,28 +437,29 @@ def main():
                 for name, width in [
                     ("Date", 12), ("Date_ISO", 12), ("YearMonth", 9), ("Month_Name", 9),
                     ("Forecast", 14), ("Forecast_Lo", 14), ("Forecast_Hi", 14),
+                    ("Forecast_Policy_Adjusted", 20), ("Forecast_Conservative", 18), ("Forecast_Aggressive", 18),
                 ]:
                     ci = col_idx_tot(name)
                     if ci is not None: ws_tot.set_column(ci, ci, width)
                 ws_tot.freeze_panes(1, 0)
 
-            # 4. Model Governance & Reliability Scorecard
+            # 5. Model Governance & Reliability Scorecard
             if not governance_scorecard.empty:
                 governance_scorecard.to_excel(w, sheet_name="Model_Governance", index=False)
                 w.sheets["Model_Governance"].freeze_panes(1, 0)
 
-            # 5. Full Prediction Audit Trail (what model, why, low, best, high, actuals)
+            # 6. Full Prediction Audit Trail (what model, why, low, best, high, actuals)
             if not audit_history.empty:
                 audit_history.to_excel(w, sheet_name="Prediction_Audit", index=False)
                 w.sheets["Prediction_Audit"].freeze_panes(1, 0)
 
-            # 6. History sheet
+            # 7. History sheet
             hist2 = hist.copy()
             hist2 = _add_date_helpers(hist2.rename(columns={"Value":"Actual"}))
             hist2.to_excel(w, sheet_name="History", index=False)
             w.sheets["History"].freeze_panes(1, 0)
 
-            # 7. Selection sheet
+            # 8. Selection sheet
             sel.to_excel(w, sheet_name="Series_Selection", index=False)
             w.sheets["Series_Selection"].freeze_panes(1, 0)
     except Exception as e:

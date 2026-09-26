@@ -61,6 +61,7 @@ GROUP2     = {
     "Model07_XGBoost":      BASE / "Model07_XGBoost",
     "Model08_LSTM":         BASE / "Model08_LSTM",
     "Model10_Global_LGBM":  BASE / "Model10_Global_LGBM",
+    "Model11_Croston_TSB":  BASE / "Model11_Croston_TSB",
 }
 ALL_MODELS = {**GROUP1, **GROUP2}
 
