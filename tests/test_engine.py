@@ -39,7 +39,9 @@ def test_end_to_end(raw, settings, tmp_path):
 
     # reports from the saved run (the `report` CLI path)
     paths = build_reports(load_result(out))
+    countries = paths.pop("countries")
     assert all(p.exists() and p.stat().st_size > 5_000 for p in paths.values())
+    assert countries and all(p.exists() and p.stat().st_size > 5_000 for p in countries.values())
 
     # idempotent history: rerunning the same date replaces, not duplicates
     n1 = len(pd.read_parquet(hist))

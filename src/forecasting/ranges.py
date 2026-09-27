@@ -37,6 +37,7 @@ SCALE_BOUNDS = (0.8, 1.5)       # symmetric width factor
 SCALE_MIN_N = 30
 SCALE_TRIGGER_PP = 5.0
 MONTH_WINDOW = 1                # monthly ranges use errors at h-1..h+1
+REF_KEY = 3                     # quarter totals: the reference volatility for location-scale pooling
 
 
 def group_of(level: str) -> str:
@@ -69,6 +70,29 @@ class _Store:
         cols = ["key", "o", "end", "r"]
         self.node = {n: tuple(g[c].to_numpy() for c in cols) for n, g in e.groupby("node_id")}
         self.pool = {k: tuple(g[c].to_numpy() for c in cols) for k, g in e.groupby(["Metric", "Level"])}
+        self.members = {k: g["node_id"].unique().tolist() for k, g in e.groupby(["Metric", "Level"])}
+        self._cache: dict = {}
+
+    def ref_scale(self, nid, at, ref_key=REF_KEY):
+        """Robust spread of the series' own quarter-total errors realised by `at` (well estimated)."""
+        r, _ = self.pick(self.node.get(nid), ref_key, at, 0)
+        if len(r) < 6:
+            return np.nan
+        return 1.4826 * float(np.median(np.abs(r - np.median(r))))
+
+    def scaled_pool(self, pool_key, key, at):
+        """Location-scale pooling: every member's k-month errors divided by that member's own quarter
+        spread, so volatile and calm series can share one SHAPE of long-window uncertainty."""
+        ck = (pool_key, key, at)
+        if ck not in self._cache:
+            z = []
+            for m in self.members.get(pool_key, []):
+                s = self.ref_scale(m, at)
+                r, _ = self.pick(self.node.get(m), key, at, 0)
+                if np.isfinite(s) and s > 0 and len(r):
+                    z.append(r / s)
+            self._cache[ck] = np.concatenate(z) if z else np.empty(0)
+        return self._cache[ck]
 
     @staticmethod
     def pick(arr, key, at, window):
@@ -79,8 +103,18 @@ class _Store:
         return r_[m], o_[m]
 
 
-def _fit(method: str, own_r, own_o, pool_r, at, levels, min_obs) -> Dict[str, float]:
-    use_own = len(own_r) >= min_obs
+MIN_INDEPENDENT = 4    # k-month totals: own errors used only with >= 4 non-overlapping windows' worth
+
+
+def _own_enough(n: int, min_obs: int, overlap: int) -> bool:
+    """Consecutive k-month windows share k-1 months, so n of them carry only about n/k independent
+    observations. A series' own spread is used only when that effective sample is large enough;
+    otherwise the pool of comparable series is used (a 12-month range from ~2 episodes is noise)."""
+    return n >= min_obs and (overlap <= 1 or n / overlap >= MIN_INDEPENDENT)
+
+
+def _fit(method: str, own_r, own_o, pool_r, at, levels, min_obs, overlap: int = 1) -> Dict[str, float]:
+    use_own = _own_enough(len(own_r), min_obs, overlap)
     if not use_own and len(pool_r) < 3:
         return {}
     out = {}
@@ -111,6 +145,26 @@ def _fit(method: str, own_r, own_o, pool_r, at, levels, min_obs) -> Dict[str, fl
     return out
 
 
+def _inputs(store: "_Store", kind: str, nid: str, pool_key: tuple, key: int, at: int, min_obs: int):
+    """(own errors, own origins, pool errors, multiplier, overlap, source). For long totals without enough
+    independent own evidence: pooled standardised errors x the series' own quarter spread."""
+    window = MONTH_WINDOW if kind == "month" else 0
+    ov = key if kind == "total" else 1
+    own_r, own_o = store.pick(store.node.get(nid), key, at, window)
+    pool_r, _ = store.pick(store.pool.get(pool_key), key, at, window)
+    if kind == "total" and key > REF_KEY and not _own_enough(len(own_r), min_obs, ov):
+        s = store.ref_scale(nid, at)
+        z = store.scaled_pool(pool_key, key, at)
+        if np.isfinite(s) and s > 0 and len(z) >= 3:
+            return np.empty(0), np.empty(0), z, s, ov, "own quarter volatility x pooled shape"
+    own = _own_enough(len(own_r), min_obs, ov)
+    return own_r, own_o, pool_r, 1.0, ov, ("own errors" if own else "comparable series")
+
+
+def _scaled(q: Dict[str, float], mult: float) -> Dict[str, float]:
+    return {k: v * mult for k, v in q.items()} if mult != 1.0 else q
+
+
 def _interval_score(lo, hi, a, L):
     al = 1 - L / 100
     return (hi - lo) + 2 / al * np.maximum(lo - a, 0) + 2 / al * np.maximum(a - hi, 0)
@@ -127,21 +181,19 @@ def sequential_test(err: pd.DataFrame, kind: str, nodes: pd.DataFrame, levels: S
     store = _Store(err, meta)
     origins = np.sort(err["o"].unique())[-n_test:]
     test = err[err["o"].isin(origins)].merge(meta, left_on="node_id", right_index=True, how="inner")
-    window = MONTH_WINDOW if kind == "month" else 0
     recs = []
     for x in test.itertuples(index=False):
-        own_r, own_o = store.pick(store.node.get(x.node_id), x.key, x.o, window)
-        pool_r, _ = store.pick(store.pool.get((x.Metric, x.Level)), x.key, x.o, window)
+        own_r, own_o, pool_r, mult, ov, _src = _inputs(store, kind, x.node_id, (x.Metric, x.Level), x.key, x.o, min_obs)
         for meth in METHODS:
-            q = _fit(meth, own_r, own_o, pool_r, x.o, levels, min_obs)
+            q = _scaled(_fit(meth, own_r, own_o, pool_r, x.o, levels, min_obs, ov), mult)
             if not q:
                 continue
             for L in levels:
                 lo, hi = min(q[f"q_lo{L}"], 0.0), max(q[f"q_hi{L}"], 0.0)
                 P = max(float(x.Pred), 0.0)
                 Lo, Hi = np.expm1(np.log1p(P) + lo), np.expm1(np.log1p(P) + hi)
-                recs.append({"Group": group_of(x.Level), "Window": _window_name(kind, x.key), "Method": meth,
-                             "L": L, "r": x.r, "lo": lo, "hi": hi, "Covered": lo <= x.r <= hi,
+                recs.append({"Group": group_of(x.Level), "Level": x.Level, "Window": _window_name(kind, x.key),
+                             "Method": meth, "o": x.o, "end": x.end, "L": L, "r": x.r, "lo": lo, "hi": hi, "Covered": lo <= x.r <= hi,
                              "Width_Pct": 100 * (Hi - Lo) / max(P, 1.0),
                              "Score": _interval_score(Lo, Hi, float(x.Actual), L) / max(float(x.Actual), 1.0)})
     return pd.DataFrame(recs)
@@ -168,19 +220,71 @@ def choose(test: pd.DataFrame, levels: Sequence[int]) -> Tuple[Dict[Tuple[str, s
             g = test[(test["Group"] == grp) & (test["Window"] == win) & (test["Method"] == meth) & (test["L"] == L)]
             if g.empty:
                 continue
-            r, lo, hi = g["r"].to_numpy(), g["lo"].to_numpy(), g["hi"].to_numpy()
-            # width multiple each error would have needed to be inside its range
-            need = np.where(r >= 0, r / np.where(hi > 0, hi, np.inf), r / np.where(lo < 0, lo, -np.inf))
-            need = np.where(np.isfinite(need), need, np.inf)
+            need = _need(g)
             before = 100 * float(np.mean(need <= 1.0))
-            f = 1.0
-            if len(r) >= SCALE_MIN_N and abs(before - L) > SCALE_TRIGGER_PP:
-                f = float(np.clip(np.quantile(need, L / 100), *SCALE_BOUNDS))
+            f = _width_factor(need, L, _overlap(win))
             scale[(grp, win, L)] = f
             rows.append({"Group": grp, "Window": win, "Method": meth, "Interval": f"{L}%", "Width_Factor": round(f, 3),
                          "Coverage_Before_Pct": before, "Coverage_After_Pct": 100 * float(np.mean(need <= f)),
-                         "Target_Pct": L, "N": len(r)})
+                         "Target_Pct": L, "N": len(need)})
     return chosen, summ, scale, pd.DataFrame(rows)
+
+
+def _need(g: pd.DataFrame) -> np.ndarray:
+    """Width multiple each error would have needed to fall inside its range."""
+    r, lo, hi = g["r"].to_numpy(), g["lo"].to_numpy(), g["hi"].to_numpy()
+    need = np.where(r >= 0, r / np.where(hi > 0, hi, np.inf), r / np.where(lo < 0, lo, -np.inf))
+    return np.where(np.isfinite(need), need, np.inf)
+
+
+def _overlap(window: str) -> int:
+    """'Next 12 months' -> 12 (consecutive windows overlap); monthly windows -> 1."""
+    return int(window.split()[1]) if window.startswith("Next ") else 1
+
+
+def _width_factor(need: np.ndarray, L: int, overlap: int = 1) -> float:
+    """Symmetric width correction, only with enough INDEPENDENT test results (overlapping k-month
+    windows count as n/k)."""
+    before = 100 * float(np.mean(need <= 1.0)) if len(need) else L
+    if len(need) / overlap >= SCALE_MIN_N and abs(before - L) > SCALE_TRIGGER_PP:
+        return float(np.clip(np.quantile(need, L / 100), *SCALE_BOUNDS))
+    return 1.0
+
+
+NESTED_MIN = 20     # earlier realised test results needed before the nested replay decides anything
+
+
+def nested_coverage(test: pd.DataFrame, levels: Sequence[int]) -> pd.DataFrame:
+    """
+    Fully out-of-sample check of the WHOLE range procedure. At each test origin, the method and the width
+    factor are decided from earlier test results that had been realised by then (end <= origin), exactly
+    as they would have been in production; coverage is then measured at that origin. Unlike
+    Coverage_After_Pct (fitted on the same results it reports), nothing here is in-sample.
+    """
+    if test.empty:
+        return pd.DataFrame()
+    out = []
+    for (grp, win), g in test.groupby(["Group", "Window"]):
+        for o in np.sort(g["o"].unique()):
+            prior = g[g["end"] <= o]
+            if prior["o"].nunique() < 2 or len(prior) < NESTED_MIN * len(METHODS) * len(levels):
+                continue
+            sc = prior.groupby("Method")["Score"].mean()
+            meth = sc.idxmin() if len(sc) == len(METHODS) else "empirical"
+            now = g[(g["o"] == o) & (g["Method"] == meth)]
+            for L in levels:
+                f = _width_factor(_need(prior[(prior["Method"] == meth) & (prior["L"] == L)]), L, _overlap(win))
+                x = now[now["L"] == L]
+                if len(x):
+                    out.append(pd.DataFrame({"Group": grp, "Level": x["Level"].to_numpy(), "Window": win, "L": L,
+                                             "Covered": _need(x) <= f}))
+    if not out:
+        return pd.DataFrame()
+    d = pd.concat(out, ignore_index=True)
+    res = (d.groupby(["Level", "Window", "L"])["Covered"].agg(Tested_Coverage_Pct=lambda v: 100 * v.mean(), N="size")
+           .reset_index())
+    res["Interval"] = res["L"].astype(str) + "%"
+    return res.rename(columns={"L": "Target_Pct"})[["Level", "Window", "Interval", "Target_Pct", "Tested_Coverage_Pct", "N"]]
 
 
 def final_quantiles(err: pd.DataFrame, kind: str, nodes: pd.DataFrame, levels: Sequence[int], min_obs: int,
@@ -190,47 +294,48 @@ def final_quantiles(err: pd.DataFrame, kind: str, nodes: pd.DataFrame, levels: S
     meta = nodes.set_index("node_id")[["Metric", "Level"]]
     store = _Store(err, meta)
     at = int(err["end"].max()) if len(err) else 0
-    window = MONTH_WINDOW if kind == "month" else 0
     rows = []
     for nid, (m, lvl) in meta.iterrows():
         grp = group_of(lvl)
         for key in keys:
             win = _window_name(kind, key)
             meth = chosen.get((grp, win)) or chosen.get(("Region", win)) or "empirical"
-            own_r, own_o = store.pick(store.node.get(nid), key, at, window)
-            pool_r = np.empty(0)
-            for pk in ((m, lvl), (m, "Region")):
-                pool_r, _ = store.pick(store.pool.get(pk), key, at, window)
-                if len(pool_r) >= 3:
+            for pk in ((m, lvl), (m, "Region")):       # comparable series; regions as fallback
+                own_r, own_o, pool_r, mult, ov, how = _inputs(store, kind, nid, pk, key, at, min_obs)
+                if how != "comparable series" or len(pool_r) >= 3:
                     break
-            q = _fit(meth, own_r, own_o, pool_r, at, levels, min_obs)
+            q = _scaled(_fit(meth, own_r, own_o, pool_r, at, levels, min_obs, ov), mult)
             if not q:
                 continue
             for L in levels:
                 f = scale.get((grp, win, L), 1.0)
                 q[f"q_lo{L}"], q[f"q_hi{L}"] = f * q[f"q_lo{L}"], f * q[f"q_hi{L}"]
-            src = f"{meth} ({'own errors' if len(own_r) >= min_obs else 'comparable series'})"
-            rows.append({"node_id": nid, ("h" if kind == "month" else "k"): key, "Source": src,
-                         "N": int(len(own_r) if len(own_r) >= min_obs else len(pool_r)), **q})
+            rows.append({"node_id": nid, ("h" if kind == "month" else "k"): key, "Source": f"{meth} ({how})",
+                         "N": int(len(own_r) if how == "own errors" else len(pool_r)), **q})
     out = pd.DataFrame(rows)
     if out.empty:
         return out
-    return _enforce(out, levels, by_h=(kind == "month"))
+    if kind == "month":
+        return _enforce(out, levels, by_h=True)
+    # a longer window is never shown as more certain (in %) than a shorter one
+    return _enforce(out.rename(columns={"k": "h"}), levels, by_h=True).rename(columns={"h": "k"})
 
 
 def build(comb_pub: pd.DataFrame, nodes: pd.DataFrame, levels: Sequence[int], min_obs: int, horizon: int,
           n_test: int = 12):
     """Monthly and total ranges plus the evidence tables."""
-    out = {}
+    out, nested = {}, []
     for kind, keys in (("month", range(1, horizon + 1)), ("total", BLOCKS)):
         err = _errors(comb_pub, kind)
         test = sequential_test(err, kind, nodes, levels, min_obs, n_test)
         chosen, summ, scale, calib = choose(test, levels)
+        nested.append(nested_coverage(test, levels))
         out[kind] = (final_quantiles(err, kind, nodes, levels, min_obs, chosen, scale, list(keys)), summ, calib)
     q, summ_m, cal_m = out["month"]
     bq, summ_t, cal_t = out["total"]
+    nested_tab = pd.concat(nested, ignore_index=True)
     test_tab = pd.concat([summ_m, summ_t], ignore_index=True)
     if len(test_tab):
         test_tab = test_tab[["Group", "Window", "Method", "Interval", "Coverage_Pct", "Median_Width_Pct",
                              "Interval_Score", "N", "Chosen"]]
-    return q, bq, test_tab, cal_m, cal_t
+    return q, bq, test_tab, cal_m, cal_t, nested_tab

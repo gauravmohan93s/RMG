@@ -63,6 +63,7 @@ class RunResult:
     calibration: pd.DataFrame
     block_calibration: pd.DataFrame
     range_test: pd.DataFrame
+    range_tested: pd.DataFrame
     guardrails: pd.DataFrame
     overlay_rules: pd.DataFrame
     catalogue: pd.DataFrame
@@ -102,6 +103,7 @@ ARTEFACTS = {
     "calibration": "Evaluation/interval_calibration.csv",
     "block_calibration": "Evaluation/total_interval_calibration.csv",
     "range_test": "Evaluation/range_method_test.csv",
+    "range_tested": "Evaluation/range_tested_coverage.csv",
     "guardrails": "Evaluation/guardrails.csv",
     "catalogue": "Evaluation/model_catalogue.csv",
     "failures": "Evaluation/model_failures.csv",
@@ -275,7 +277,7 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
     comb_pub = rl.published_backtest(comb_bt, tour, recon_method)
     # the way errors become a range (empirical quantiles vs centred robust spread) is chosen per level
     # group and window by a proper scoring rule, replayed with only the errors realised at each origin
-    q, bq, range_test, calib, block_calib = rg.build(comb_pub, nodes, levels, settings.intervals.min_obs, H,
+    q, bq, range_test, calib, block_calib, range_tested = rg.build(comb_pub, nodes, levels, settings.intervals.min_obs, H,
                                                      settings.selection.honest_eval_origins)
     lap("intervals")
 
@@ -315,6 +317,8 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
     fc["Typical_Quarter_Error_Pct"] = fc["node_id"].map(relt["Typical_Quarter_Error_Pct"])
     guard_ids = set(guards.loc[guards["Guardrail_Triggered"], "node_id"]) if len(guards) else set()
     fc.loc[fc["node_id"].isin(guard_ids), "Reliability"] = "Review"
+    # must be set BEFORE the single-region-country copies below: copied Country rows keep their region's
+    # node_id here, which is how _totals finds their ranges
     fc["Source_Node"] = fc["node_id"]
 
     # single-region countries: country total = its region
@@ -412,7 +416,7 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
     res = RunResult(out_dir=out_dir, run_id=run_id, run_date=run_date, last_actual=last_actual,
                     forecast=fc, totals=totals, periods=periods, history=panel.history, nodes=nodes,
                     series_status=panel.series_status, dq=panel.dq, scores=scores, selection=selection,
-                    accuracy=accuracy, policy_comparison=policy_cmp, calibration=calib, block_calibration=block_calib, range_test=range_test, guardrails=guards, overlay_rules=rules,
+                    accuracy=accuracy, policy_comparison=policy_cmp, calibration=calib, block_calibration=block_calib, range_test=range_test, range_tested=range_tested, guardrails=guards, overlay_rules=rules,
                     catalogue=catalogue, failures=bt.failures, track_scorecard=track_sc,
                     bias_test=bias_test, bias_estimates=bias_est, reconciliation_test=recon_test, point_estimate_test=smear_test, seasonal_index=sidx, seasonal_by_year=syear,
                     staffing=staffing, forecast_vs_actual=fva, fva_summary=fva_sum, human_scores=human_scores,

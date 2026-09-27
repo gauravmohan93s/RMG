@@ -25,7 +25,7 @@ train_start = ""
 
 [backtest]
 horizon = 12       # months ahead that are forecast AND evaluated
-n_origins = 24     # rolling forecast origins (the 24 month-ends before the latest actual)
+n_origins = 36     # rolling forecast origins (the 36 month-ends before the latest actual; v2.2: was 24)
 
 [models]
 # Candidate models (see src/forecasting/models.py). Order is irrelevant.
@@ -62,7 +62,7 @@ benchmark = "SNaive"             # reference every method is compared with
 top_k = 3
 must_beat_benchmark = true
 # Walk-forward (honest) evaluation of the selection policy on the last N origins.
-honest_eval_origins = 12
+honest_eval_origins = 24
 # If the policy loses to the benchmark by more than this in the honest test,
 # the node falls back to the benchmark.
 fallback_if_skill_below = -0.05

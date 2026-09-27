@@ -30,8 +30,11 @@ def published_backtest(comb: pd.DataFrame, nodes: pd.DataFrame, method: str) -> 
     aggregate's forecast is the sum of its regions' forecasts, so its errors (and therefore its
     ranges) must come from those sums, not from the aggregate's own unreconciled model.
     """
-    if method != "bottom_up" or comb.empty:
+    if comb.empty or method == "none":
         return comb
+    if method != "bottom_up":
+        from .reconcile import reconcile_backtest
+        return reconcile_backtest(comb, nodes, method)
     meta = nodes.set_index("node_id")
     reg = nodes[nodes["Level"] == "Region"]
     out = [comb[comb["node_id"].isin(reg["node_id"])]]

@@ -142,6 +142,7 @@ def build_panel(raw: pd.DataFrame, cfg: DataCfg) -> Panel:
             dq.append(_dq("Unmapped IDs grouped as 'Other'", cty, reg,
                           "Update Settings.xlsx Country/Region mapping"))
     series_status = pd.DataFrame(status_rows)
+    dq += latest_month_checks(grid, months)
 
     # 2) modelling nodes
     nodes, y, start = [], {}, {}
@@ -190,6 +191,45 @@ def build_panel(raw: pd.DataFrame, cfg: DataCfg) -> Panel:
     return Panel(months=months, nodes=pd.DataFrame(nodes), y=y, start=start,
                  history=history, dq=pd.DataFrame(dq, columns=["Issue", "Country", "Region", "Detail"]),
                  series_status=series_status)
+
+
+INCOMPLETE_RATIO = 0.6    # latest month's YoY growth below 60% of the previous 3 months' YoY -> suspect
+SPIKE_RATIO = 1.8         # ... or above 180% -> suspect duplicate / mapping change
+CHECK_MIN_VOLUME = 1000   # applications in the last 12 months; smaller series are too noisy to judge
+
+
+def latest_month_checks(grid: Dict[tuple, np.ndarray], months: pd.DatetimeIndex) -> List[dict]:
+    """
+    A partly loaded latest month (26th-25th cycle cut early, extract run mid-cycle) silently drags every
+    forecast down. Compare the latest month's growth vs the same month last year with the growth of the
+    three months before it; a collapse or a jump is flagged as CRITICAL for the organisation and each
+    country (seasonality cancels because both ratios are year-on-year).
+    """
+    out: List[dict] = []
+    if len(months) < 16:
+        return out
+    by_country: Dict[str, np.ndarray] = {}
+    for (cty, _reg), arr in grid.items():
+        by_country[cty] = by_country.get(cty, 0) + arr
+    series = {("Organisation", ORG): sum(by_country.values())} if by_country else {}
+    series.update({("Country", c): a for c, a in by_country.items()})
+    for (lvl, cty), arr in series.items():
+        for k, metric in enumerate(METRICS):
+            y = arr[k]
+            if y[-12:].sum() < CHECK_MIN_VOLUME:
+                continue
+            last, last_ly = y[-1], y[-13]
+            prev, prev_ly = y[-4:-1].sum(), y[-16:-13].sum()
+            if last_ly <= 0 or prev_ly <= 0 or prev <= 0:
+                continue
+            ratio = (last / last_ly) / (prev / prev_ly)
+            if ratio < INCOMPLETE_RATIO or ratio > SPIKE_RATIO:
+                kind = "may be incomplete" if ratio < INCOMPLETE_RATIO else "jumped unusually"
+                out.append(_dq(f"CRITICAL: latest month {kind}", cty if lvl == "Country" else "Organisation", TOTAL,
+                               f"{metric} {months[-1]:%b %Y}: {last:,.0f} vs {last_ly:,.0f} a year earlier "
+                               f"({100 * (last / last_ly - 1):+.0f}%), while the 3 months before grew "
+                               f"{100 * (prev / prev_ly - 1):+.0f}%. Check the extract before using this forecast."))
+    return out
 
 
 def _dq(issue: str, cty: str, reg: str, detail: str) -> dict:

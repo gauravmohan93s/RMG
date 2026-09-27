@@ -138,6 +138,37 @@ def walk_forward_test(honest: pd.DataFrame, comb: pd.DataFrame, nodes: pd.DataFr
     return (res, d) if return_detail else res
 
 
+def reconcile_backtest(comb: pd.DataFrame, nodes: pd.DataFrame, method: str) -> pd.DataFrame:
+    """
+    Every backtest forecast as it would have been PUBLISHED with `method`: at origin o the weights use
+    only one-step errors realised by o (targets <= o), exactly as in walk_forward_test. Mature series only.
+    """
+    resid = comb[comb["h"] == 1].assign(e=lambda d: d["Actual"] - d["Pred"])
+    parts = []
+    for metric in ("Received", "Submitted"):
+        mn = nodes[(nodes["Metric"] == metric) & (nodes["Status"] == "Mature")]
+        if mn.empty:
+            continue
+        S, ids, _ = summing_matrix(mn)
+        cm = comb[comb["node_id"].isin(ids)]
+        for (o, h), g in cm.groupby(["o", "h"]):
+            gi = g.set_index("node_id").reindex(ids)
+            if gi["Pred"].isna().any():
+                continue
+            yhat = gi["Pred"].to_numpy()[:, None]
+            past = resid[resid["t"] <= o]
+            var = node_variances(ids, past, pd.Series(yhat[:, 0], index=ids))
+            E = past.pivot_table(index="o", columns="node_id", values="e").reindex(columns=ids).dropna().to_numpy()
+            yt, _ = reconcile(yhat, S, method, var=var, E=E if len(E) else None)
+            out = gi.reset_index()
+            out["Pred"] = yt[:, 0]
+            parts.append(out)
+    if not parts:
+        return comb
+    res = pd.concat(parts, ignore_index=True)
+    return res[comb.columns]
+
+
 def choose_method(test: pd.DataFrame, candidates=("bottom_up", "wls_var", "mint_shrink")) -> str:
     """Method with the lowest WAPE averaged over metric x level (each level counts equally)."""
     t = test[test["Method"].isin(candidates)]

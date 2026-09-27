@@ -2,12 +2,24 @@
 """Headline numbers and deterministic narrative shared by the Excel and PDF reports."""
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 
-from ..data.prepare import METRICS
+from ..data.prepare import METRICS, TOTAL
+
+
+def test_depth(res) -> Dict[str, int]:
+    """Backtest origins and walk-forward test origins actually used in this run (from the manifest)."""
+    cfg = res.manifest.get("config", {})
+    return {"origins": int(cfg.get("backtest", {}).get("n_origins", 24)),
+            "wf": int(cfg.get("selection", {}).get("honest_eval_origins", 12))}
+
+
+def wf_period(res) -> str:
+    n = test_depth(res)["wf"]
+    return "the past year" if n <= 12 else f"the past {n // 12} years" if n % 12 == 0 else f"the past {n} months"
 
 
 def fmt_int(v) -> str:
@@ -59,10 +71,26 @@ def country_table(res) -> pd.DataFrame:
             if len(r3):
                 row.update({f"{m}_Next_Quarter": r3.iloc[0]["Forecast"], f"{m}_NQ_Lo80": r3.iloc[0].get("Lo80", np.nan),
                             f"{m}_NQ_Hi80": r3.iloc[0].get("Hi80", np.nan)})
+        for m in METRICS:
+            row[f"{m}_Recent_YoY_Pct"] = recent_yoy(res.history, lvl, cty, m)
         rows.append(row)
     df = pd.DataFrame(rows)
     df["_o"] = (df["Level"] != "Organisation").astype(int)
     return df.sort_values(["_o", "Received_Forecast"], ascending=[True, False]).drop(columns="_o")
+
+
+def recent_yoy(history: pd.DataFrame, level: str, country: str, metric: str, months: int = 6) -> float:
+    """Actual growth of the last `months` months vs the same months a year earlier — what the market is
+    doing now, to sense-check the growth the forecast assumes."""
+    h = history[(history["Metric"] == metric) & (history["Country"] == country)]
+    hh = h[(h["Level"] == level) & (h["Region"] == TOTAL)] if level != "Region" else h
+    if hh.empty:                                   # single-region country: sum its region(s)
+        hh = h[h["Level"] == "Region"]
+    s = hh.groupby("Date")["Actual"].sum().sort_index()
+    if len(s) < months + 12:
+        return np.nan
+    now, before = s.iloc[-months:].sum(), s.iloc[-months - 12:-12].sum()
+    return float(100 * (now / before - 1)) if before > 0 else np.nan
 
 
 def reliability_summary(res, metric: str = "Received") -> pd.DataFrame:
@@ -137,6 +165,8 @@ def accuracy_buckets(res, metric: str, level: str = "Organisation") -> Dict[str,
 
 
 def overall_bias(res, metric: str, level: str = "Organisation") -> float:
+    """Walk-forward bias in % of actual. Sign: Error = Forecast - Actual, so NEGATIVE = actuals came in
+    ABOVE the forecast (under-forecast). messages() relies on this convention."""
     fva = getattr(res, "forecast_vs_actual", None)
     if fva is None or fva.empty:
         return np.nan
@@ -182,15 +212,22 @@ def messages(res) -> List[str]:
     org = res.forecast[(res.forecast["Level"] == "Organisation") & (res.forecast["Metric"] == "Received")]
     err = float(org["Typical_Quarter_Error_Pct"].iloc[0]) if len(org) and "Typical_Quarter_Error_Pct" in org else np.nan
     if np.isfinite(err):
-        out.append(f"How far to trust it: tested on the past year, our organisation-level quarterly forecasts were "
+        out.append(f"How far to trust it: tested on {wf_period(res)}, our organisation-level quarterly forecasts were "
                    f"typically within ±{err:.0f}% of what actually happened.")
+    rt = getattr(res, "range_tested", None)
+    if rt is not None and len(rt):
+        x = rt[(rt["Level"] == "Organisation") & (rt["Window"] == "Next 3 months") & (rt["Interval"] == "80%")]
+        if len(x) and x["N"].iloc[0] >= 10:
+            out.append(f"Our 'plan for' quarter ranges were tested the same way: the actual organisation total fell inside "
+                       f"them {x['Tested_Coverage_Pct'].iloc[0]:.0f}% of the time (aim: 80%).")
     b = overall_bias(res, "Received")
     if np.isfinite(b) and b <= -5:
-        out.append(f"Actual volumes have recently been running above our forecasts (by about {abs(b):.0f}%), so these "
-                   "numbers lean cautious — for peak months, plan capacity towards the upper end of the range.")
+        out.append(f"In testing over {wf_period(res)}, actual volumes came in above our forecasts by about {abs(b):.0f}% "
+                   "on average, so these numbers lean cautious — for peak months, plan capacity towards the upper end "
+                   "of the range.")
     elif np.isfinite(b) and b >= 5:
-        out.append(f"Actual volumes have recently come in below our forecasts (by about {b:.0f}%), so treat the upper "
-                   "end of the range with caution.")
+        out.append(f"In testing over {wf_period(res)}, actual volumes came in below our forecasts by about {b:.0f}% on "
+                   "average, so treat the upper end of the range with caution.")
     rs = reliability_summary(res)
     if len(rs):
         hm = rs[rs["Reliability"].isin(["High", "Medium"])]["Volume_Share_Pct"].sum()
@@ -200,3 +237,79 @@ def messages(res) -> List[str]:
     out.append("No manual adjustments have been made: all figures come directly from the data." if applied == 0 else
                f"{applied} approved management adjustment(s) are included in the 'Adjusted' figures.")
     return out
+
+
+# ───────────────────────── health check (acceptance criteria fixed in advance) ─────────────────────────
+# The same checks every month. "Tested" = forecasts re-made for past months with only the data then
+# available; "Live" = the forecasts we actually published, scored as their actuals arrive. The pipeline
+# is trusted for a use once its live column passes for 3 consecutive months (shadow period).
+HEALTH = {
+    "quarter_miss": 10.0,      # organisation next-quarter total: typical miss at most ±10%
+    "coverage": (70.0, 90.0),  # planning (80%) range should hold 70-90% of the time
+    "bias": 5.0,               # average error at most ±5% of actual
+    "live_min_months": 3,
+}
+
+
+def _status(ok: Optional[bool], near: bool = False) -> str:
+    return "Not yet" if ok is None else "Pass" if ok else ("Watch" if near else "Fail")
+
+
+def health_check(res) -> pd.DataFrame:
+    rows = []
+    org = res.totals[(res.totals["Level"] == "Organisation") & (res.totals["Metric"] == "Received")
+                     & (res.totals["Window"] == "Next 3 months")]
+    tq = float(org["Typical_Quarter_Error_Pct"].iloc[0]) if len(org) else np.nan
+    fva = getattr(res, "forecast_vs_actual", None)
+    live = fva[~fva["Source"].astype(str).str.startswith("Walk-forward")] if fva is not None and len(fva) else pd.DataFrame()
+    lq, ln = np.nan, 0
+    if len(live):
+        q = live[(live["Level"] == "Organisation") & (live["Metric"] == "Received") & live["Months_Ahead"].between(1, 3)]
+        g = q.groupby("Made_At").filter(lambda x: len(x) == 3).groupby("Made_At")[["Forecast", "Actual"]].sum()
+        if len(g):
+            lq, ln = float((100 * (g["Forecast"] - g["Actual"]).abs() / g["Actual"]).median()), len(g)
+    lim = HEALTH["quarter_miss"]
+    rows.append({"Check": "Organisation next-quarter total is close", "Target": f"typical miss up to ±{lim:.0f}%",
+                 "Tested": f"±{tq:.1f}%" if np.isfinite(tq) else "–",
+                 "Tested_Status": _status(tq <= lim if np.isfinite(tq) else None, np.isfinite(tq) and tq <= lim * 1.2),
+                 "Live": f"±{lq:.1f}% ({ln} quarters)" if ln else "–",
+                 "Live_Status": _status(lq <= lim if ln >= HEALTH["live_min_months"] else None)})
+
+    lo, hi = HEALTH["coverage"]
+    rt = getattr(res, "range_tested", None)
+    tc = np.nan
+    if rt is not None and len(rt):
+        x = rt[rt["Level"].isin(["Organisation", "Country"]) & (rt["Window"] == "Next 3 months") & (rt["Interval"] == "80%")]
+        if len(x) and x["N"].sum():
+            tc = float(np.average(x["Tested_Coverage_Pct"], weights=x["N"]))
+    sc = getattr(res, "track_scorecard", None)
+    lc, lb, lnm = np.nan, np.nan, 0
+    if sc is not None and len(sc) and "Coverage80_Pct" in sc:
+        s = sc[(sc["Level"] == "Organisation") & (sc["Metric"] == "Received") & (sc["Horizon_Bucket"].astype(str) == "1-3")]
+        if len(s):
+            lnm = int(s["Forecasts_Evaluated"].sum())
+            lc = float(np.average(s["Coverage80_Pct"], weights=s["Forecasts_Evaluated"]))
+            lb = float(np.average(s["Bias_Pct"], weights=s["Forecasts_Evaluated"]))
+    rows.append({"Check": "Planning range holds as promised", "Target": f"actual inside {lo:.0f}–{hi:.0f}% of the time",
+                 "Tested": f"{tc:.0f}%" if np.isfinite(tc) else "–",
+                 "Tested_Status": _status(lo <= tc <= hi if np.isfinite(tc) else None, np.isfinite(tc) and lo - 5 <= tc <= hi + 5),
+                 "Live": f"{lc:.0f}% ({lnm} months)" if lnm else "–",
+                 "Live_Status": _status(lo <= lc <= hi if lnm >= HEALTH["live_min_months"] else None)})
+
+    b = overall_bias(res, "Received")
+    bl = HEALTH["bias"]
+    rows.append({"Check": "No persistent over- or under-forecast", "Target": f"average error within ±{bl:.0f}%",
+                 "Tested": f"{-b:+.1f}%" if np.isfinite(b) else "–",
+                 "Tested_Status": _status(abs(b) <= bl if np.isfinite(b) else None, np.isfinite(b) and abs(b) <= 2 * bl),
+                 "Live": f"{-lb:+.1f}% ({lnm} months)" if lnm else "–",
+                 "Live_Status": _status(abs(lb) <= bl if lnm >= HEALTH["live_min_months"] else None)})
+
+    acc = accuracy_table(res, "Received")
+    if len(acc):
+        o = acc[(acc["Level"] == "Organisation") & (acc["Months_Ahead"] == "1-3")]
+        if len(o):
+            w, bw = float(o["WAPE_Pct"].iloc[0]), float(o["Benchmark_WAPE_Pct"].iloc[0])
+            rows.append({"Check": "Better than 'same month last year'", "Target": "smaller monthly error",
+                         "Tested": f"±{w:.0f}% vs ±{bw:.0f}%", "Tested_Status": _status(w < bw),
+                         "Live": "–", "Live_Status": "Not yet"})
+    return pd.DataFrame(rows)

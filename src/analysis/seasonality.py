@@ -157,6 +157,6 @@ def staffing_calendar(fc: pd.DataFrame, sidx: pd.DataFrame, high: float = 1.10, 
         st.loc[m, "FTE_Base"] = f
         # capacity FTE: aggregate capacity x the level's effective apps-per-FTE (from its regions)
         st.loc[m, "FTE_Capacity_80"] = st.loc[m, "Capacity_Plan_80"].to_numpy() * f / st.loc[m, "Forecast"].to_numpy()
-        st.loc[m, "Productivity_Source"] = [f"sum of regions ({100 * c:.0f}% with a rate)" if np.isfinite(c) else ""
+        st.loc[m, "Productivity_Source"] = [f"regions summed; capacity at this level's own 80% high ({100 * c:.0f}% of volume has a rate)" if np.isfinite(c) else ""
                                             for c in cov]
     return st

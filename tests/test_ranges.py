@@ -36,7 +36,7 @@ def test_centred_range_is_symmetric_in_log_space():
 
 def test_build_gives_every_node_nested_ranges_and_evidence():
     nodes = _nodes()
-    q, bq, test, cal_m, cal_t = rg.build(_backtest(nodes), nodes, LEVELS, 8, 12)
+    q, bq, test, cal_m, cal_t, nested = rg.build(_backtest(nodes), nodes, LEVELS, 8, 12)
     assert set(q["node_id"]) == set(nodes["node_id"])            # emerging node gets pooled ranges
     assert set(bq["k"]) == {3, 6, 12}
     for L_n, L_w in ((50, 80), (80, 95)):
@@ -52,6 +52,14 @@ def test_build_gives_every_node_nested_ranges_and_evidence():
 def test_persistent_bias_is_not_hidden():
     """If actuals are always above forecasts, the published 80% range must still cover them ~80% of the time."""
     nodes = _nodes()
-    _, _, _, cal_m, cal_t = rg.build(_backtest(nodes, bias=0.25, sd=0.08), nodes, LEVELS, 8, 12)
+    _, _, _, cal_m, cal_t, nested = rg.build(_backtest(nodes, bias=0.25, sd=0.08), nodes, LEVELS, 8, 12)
     reg = cal_m[(cal_m["Group"] == "Region") & (cal_m["Interval"] == "80%")]
     assert (reg["Coverage_After_Pct"] >= 70).all()
+
+
+def test_nested_coverage_is_out_of_sample_and_near_target():
+    nodes = _nodes()
+    *_, nested = rg.build(_backtest(nodes, seed=3), nodes, LEVELS, 8, 12)
+    assert {"Level", "Window", "Tested_Coverage_Pct", "N"} <= set(nested.columns)
+    m = nested[(nested["Level"] == "Region") & (nested["Interval"] == "80%") & (nested["Window"] == "Months 1-3 ahead")]
+    assert len(m) == 1 and 65 <= m["Tested_Coverage_Pct"].iloc[0] <= 95

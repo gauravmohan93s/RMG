@@ -163,3 +163,237 @@ def accuracy_by_horizon(acc: pd.DataFrame, metric: str, level: str = "Region", s
     ax.legend(fontsize=7, frameon=False)
     ax.set_ylim(bottom=0)
     return _png(fig)
+
+
+# ───────────────────────── monthly forecast pack (v2.2) ─────────────────────────
+REL_COLOR = {"High": "#2e9e5b", "Medium": "#e0a100", "Low": "#d6453d", "New": "#9a9a95", "Review": "#b36b00"}
+
+
+def _k(v) -> str:
+    """Compact number: 386,891 -> 387k, 4,810 -> 4.8k, 812 -> 812."""
+    if v is None or not np.isfinite(v):
+        return "–"
+    a = abs(v)
+    if a >= 1e6:
+        return f"{v / 1e6:.1f}M"
+    if a >= 1e4:
+        return f"{v / 1e3:.0f}k"
+    if a >= 1e3:
+        return f"{v / 1e3:.1f}k"
+    return f"{v:.0f}"
+
+
+def _kfmt(ax, axis="y"):
+    fmt = FuncFormatter(lambda v, _: _k(v) if v else "0")
+    (ax.yaxis if axis == "y" else ax.xaxis).set_major_formatter(fmt)
+
+
+def _month_axis(ax):
+    import matplotlib.dates as mdates
+    ax.xaxis.set_major_locator(mdates.MonthLocator(bymonth=(1, 4, 7, 10)))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %y"))
+    for t in ax.get_xticklabels():
+        t.set_fontsize(6.5)
+
+
+def pack_forecast(hist: pd.DataFrame, fc: pd.DataFrame, metric: str, title: str, size=(6.4, 2.9),
+                  months_back: int = 24) -> bytes:
+    """Actual (last 24 months) and forecast (next 12) with 'most likely' and 'plan for' bands, direct labels."""
+    color = SERIES.get(metric, SERIES["Received"])
+    h = hist.sort_values("Date").tail(months_back)
+    f = fc.sort_values("Date")
+    fig, ax = plt.subplots(figsize=size)
+    fig.patch.set_facecolor(SURFACE)
+    _style(ax)
+    _kfmt(ax)
+    if len(f):
+        ax.fill_between(f["Date"], f["Lo80"], f["Hi80"], color=color, alpha=0.13, lw=0, label="Plan for (8 in 10)")
+        if "Lo50" in f:
+            ax.fill_between(f["Date"], f["Lo50"], f["Hi50"], color=color, alpha=0.30, lw=0, label="Most likely (1 in 2)")
+        ax.plot(f["Date"], f["Forecast"], color=color, lw=2.0, label="Forecast")
+    if len(h):
+        ax.plot(h["Date"], h["Actual"], color=INK_2, lw=1.6, label="Actual")
+        if len(f):   # same months last year, drawn under the forecast for direct comparison
+            ly = h[h["Date"] >= f["Date"].min() - pd.DateOffset(years=1)]
+            ax.plot(ly["Date"] + pd.DateOffset(years=1), ly["Actual"], color=INK_2, lw=0.9, ls=":",
+                    label="Same months last year")
+    if len(h) and len(f):
+        ax.plot([h["Date"].iloc[-1], f["Date"].iloc[0]], [h["Actual"].iloc[-1], f["Forecast"].iloc[0]],
+                color=color, lw=1.1, ls=":")
+        ax.axvline(h["Date"].iloc[-1], color=GRID, lw=1)
+        top = max(h["Actual"].max(), f["Hi80"].max())
+        ax.text(h["Date"].iloc[-1], top * 1.14, " forecast →", fontsize=6.5, color=INK_2, va="top")
+        ax.text(h["Date"].iloc[-1], top * 1.14, "actual ← ", fontsize=6.5, color=INK_2, va="top", ha="right")
+        ax.annotate(_k(h["Actual"].iloc[-1]), (h["Date"].iloc[-1], h["Actual"].iloc[-1]), textcoords="offset points",
+                    xytext=(-6, -11), ha="right", fontsize=6.5, color=INK_2)
+        pk = f.loc[f["Forecast"].idxmax()]
+        pts = [(f["Date"].iloc[0], f["Forecast"].iloc[0])]
+        if pk["Date"] != f["Date"].iloc[0]:
+            pts.append((pk["Date"], pk["Forecast"]))
+        for d, v in pts:
+            ax.annotate(f"{_k(v)} {d:%b}", (d, v), textcoords="offset points", xytext=(0, 7), ha="center",
+                        fontsize=6.5, color=color, fontweight="bold")
+        ax.set_ylim(0, top * 1.2)
+    _month_axis(ax)
+    ax.set_title(title, fontsize=9, color=INK, loc="left", pad=16)
+    ax.legend(fontsize=6, frameon=False, loc="lower left", bbox_to_anchor=(0, 1.0), ncols=5, handlelength=1.4,
+              borderaxespad=0.1)
+    ax.set_ylabel(f"Applications {metric.lower()} per month", fontsize=6.5, color=INK_2)
+    return _png(fig)
+
+
+def destination_bars(ct: pd.DataFrame, metric: str = "Received", title: str = "", size=(6.4, 4.2)) -> bytes:
+    """Next-12-month forecast per destination: bar = forecast (colour = reliability), whisker = plan-for
+    range, black tick = same months last year; value and change written at the end of each bar."""
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+    d = ct[ct["Level"] == "Country"].sort_values(f"{metric}_Forecast")
+    fig, ax = plt.subplots(figsize=size)
+    fig.patch.set_facecolor(SURFACE)
+    _style(ax)
+    ax.grid(axis="y", visible=False)
+    ax.grid(axis="x", color=GRID, lw=0.6)
+    y = np.arange(len(d))
+    f = d[f"{metric}_Forecast"].to_numpy(dtype=float)
+    ax.barh(y, f, color=[REL_COLOR.get(r, REL_COLOR["New"]) for r in d[f"{metric}_Reliability"]], height=0.62,
+            alpha=0.9)
+    lo, hi = d[f"{metric}_Lo80"].to_numpy(dtype=float), d[f"{metric}_Hi80"].to_numpy(dtype=float)
+    ax.errorbar(f, y, xerr=[np.clip(f - lo, 0, None), np.clip(hi - f, 0, None)], fmt="none", ecolor=INK, lw=0.8,
+                capsize=2)
+    ax.scatter(d[f"{metric}_Last_Year"], y, marker="|", s=110, color=INK, zorder=3)
+    xmax = float(np.nanmax(hi)) if len(hi) else 1.0
+    for yi, fi, hii, yoy in zip(y, f, hi, d[f"{metric}_YoY_Pct"]):
+        lab = f"{_k(fi)}  ({yoy:+.0f}%)" if np.isfinite(yoy) else _k(fi)
+        ax.text(np.nanmax([hii, fi]) + 0.02 * xmax, yi, lab, va="center", fontsize=6.8, color=INK)
+    ax.set_yticks(y, d["Country"], fontsize=7)
+    ax.set_xlim(0, xmax * 1.3)
+    _kfmt(ax, "x")
+    handles = [Patch(color=REL_COLOR[k], label=f"{k} reliability") for k in ("High", "Medium", "Low")]
+    handles += [Line2D([], [], color=INK, lw=0.8, label="Plan-for range"),
+                Line2D([], [], color=INK, marker="|", ls="", ms=9, label="Same months last year")]
+    ax.legend(handles=handles, fontsize=6, frameon=False, loc="lower right")
+    ax.set_title(title, fontsize=9, color=INK, loc="left")
+    return _png(fig)
+
+
+def growth_check(ct: pd.DataFrame, metric: str = "Received", title: str = "", size=(6.4, 4.2),
+                 cap: float = 150) -> bytes:
+    """Forecast growth vs how the market actually grew in the last 6 months (sense-check of the assumption)."""
+    d = ct[ct["Level"].isin(["Country", "Organisation"])].iloc[::-1]
+    fig, ax = plt.subplots(figsize=size)
+    fig.patch.set_facecolor(SURFACE)
+    _style(ax)
+    ax.grid(axis="y", visible=False)
+    ax.grid(axis="x", color=GRID, lw=0.6)
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:+.0f}%"))
+    y = np.arange(len(d))
+    fy = d[f"{metric}_YoY_Pct"].to_numpy(dtype=float)
+    col = f"{metric}_Recent_YoY_Pct"
+    ry = d[col].to_numpy(dtype=float) if col in d else np.full(len(d), np.nan)
+    c = SERIES.get(metric)
+    for yi, a, b in zip(y, fy, ry):
+        if np.isfinite(a) and np.isfinite(b):
+            ax.plot([np.clip(a, -cap, cap), np.clip(b, -cap, cap)], [yi, yi], color=GRID, lw=2.2, zorder=1)
+    ax.scatter(np.clip(ry, -cap, cap), y, s=34, facecolors=SURFACE, edgecolors=INK_2, lw=1.3, zorder=2,
+               label="Actual: last 6 months vs a year earlier")
+    ax.scatter(np.clip(fy, -cap, cap), y, s=34, color=c, zorder=3, label="Forecast: next 12 months vs last year")
+    ax.axvline(0, color=INK_2, lw=0.8)
+    ax.set_yticks(y, d["Country"], fontsize=7)
+    ax.set_ylim(-0.7, len(d) + 0.4)
+    ax.set_xlim(-100, cap + 10)
+    # exact values in two fixed columns on the right (dots beyond the axis are shown at the edge)
+    tr = ax.get_yaxis_transform()
+    ax.text(1.04, len(d) - 0.1, "Forecast", transform=tr, fontsize=6.3, color=c, ha="center", fontweight="bold")
+    ax.text(1.16, len(d) - 0.1, "Now", transform=tr, fontsize=6.3, color=INK_2, ha="center", fontweight="bold")
+    for yi, a, b in zip(y, fy, ry):
+        ax.text(1.04, yi, f"{a:+.0f}%" if np.isfinite(a) else "–", transform=tr, fontsize=6.5, color=c, ha="center",
+                va="center")
+        ax.text(1.16, yi, f"{b:+.0f}%" if np.isfinite(b) else "–", transform=tr, fontsize=6.5, color=INK_2,
+                ha="center", va="center")
+    ax.legend(fontsize=6, frameon=False, loc="upper left", bbox_to_anchor=(0, -0.08), ncols=2)
+    ax.set_title(title, fontsize=9, color=INK, loc="left")
+    return _png(fig)
+
+
+def workload_heatmap(staff: pd.DataFrame, metric: str = "Received", title: str = "", size=(13.0, 4.4)) -> bytes:
+    """Next 12 months x destination. Cell = forecast applications; colour = busier (blue) or quieter
+    (grey) than that destination's own average month, so small and large markets read the same way."""
+    from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
+    s = staff[(staff["Metric"] == metric) & staff["Level"].isin(["Organisation", "Country"])].copy()
+    s["Date"] = pd.to_datetime(s["Date"])
+    order = s.groupby("Label")["Forecast"].sum().sort_values(ascending=False).index.tolist()
+    if "Organisation" in order:
+        order.remove("Organisation")
+        order = ["Organisation"] + order
+    piv = s.pivot_table(index="Label", columns="Date", values="Forecast").reindex(order)
+    rel = piv.div(piv.mean(axis=1), axis=0)
+    fig, ax = plt.subplots(figsize=size)
+    fig.patch.set_facecolor(SURFACE)
+    cmap = LinearSegmentedColormap.from_list("load", ["#dcdfe4", "#ffffff", "#2a78d6"])
+    ax.imshow(rel.to_numpy(dtype=float), aspect="auto", cmap=cmap, norm=TwoSlopeNorm(vmin=0.6, vcenter=1.0, vmax=1.4))
+    for i in range(piv.shape[0]):
+        for j in range(piv.shape[1]):
+            v, r = piv.iat[i, j], rel.iat[i, j]
+            if np.isfinite(v):
+                ax.text(j, i, _k(v), ha="center", va="center", fontsize=6.6,
+                        color="white" if r >= 1.28 else INK, fontweight="bold" if r >= 1.10 else "normal")
+    ax.set_xticks(range(piv.shape[1]), [f"{d:%b}\n{d:%Y}" for d in piv.columns], fontsize=6.8)
+    ax.set_yticks(range(piv.shape[0]), piv.index, fontsize=7)
+    ax.axhline(0.5, color=INK_2, lw=0.8)
+    ax.tick_params(length=0)
+    for sp in ax.spines.values():
+        sp.set_visible(False)
+    ax.xaxis.tick_top()
+    ax.set_title(title, fontsize=9.5, color=INK, loc="left", pad=24)
+    return _png(fig)
+
+
+def region_bars(tot: pd.DataFrame, metric: str, title: str, size=(6.4, 3.2), top: int = 12) -> bytes:
+    """Regions of one destination: next-12-month forecast (colour = reliability), plan-for whisker."""
+    d = tot[(tot["Level"] == "Region") & (tot["Metric"] == metric) & (tot["Window"] == "Next 12 months")]
+    d = d.sort_values("Forecast", ascending=False)
+    rest = d.iloc[top:]
+    d = d.iloc[:top].iloc[::-1]
+    fig, ax = plt.subplots(figsize=size)
+    fig.patch.set_facecolor(SURFACE)
+    _style(ax)
+    ax.grid(axis="y", visible=False)
+    ax.grid(axis="x", color=GRID, lw=0.6)
+    y = np.arange(len(d))
+    f = d["Forecast"].to_numpy(dtype=float)
+    ax.barh(y, f, color=[REL_COLOR.get(r, REL_COLOR["New"]) for r in d["Reliability"]], height=0.6, alpha=0.9)
+    lo, hi = d["Lo80"].to_numpy(dtype=float), d["Hi80"].to_numpy(dtype=float)
+    ax.errorbar(f, y, xerr=[np.clip(f - lo, 0, None), np.clip(hi - f, 0, None)], fmt="none", ecolor=INK, lw=0.7,
+                capsize=2)
+    xmax = float(np.nanmax(hi)) if len(hi) else 1.0
+    for yi, fi, hii, yoy in zip(y, f, hi, d["YoY_Pct"]):
+        ax.text(np.nanmax([hii, fi]) + 0.02 * xmax, yi, f"{_k(fi)} ({yoy:+.0f}%)" if np.isfinite(yoy) else _k(fi),
+                va="center", fontsize=6.3)
+    ax.set_yticks(y, d["Region"], fontsize=6.6)
+    ax.set_xlim(0, xmax * 1.38)
+    _kfmt(ax, "x")
+    t = title + (f"  (top {top}; {len(rest)} smaller regions total {_k(rest['Forecast'].sum())})" if len(rest) else "")
+    ax.set_title(t, fontsize=8.5, color=INK, loc="left")
+    return _png(fig)
+
+
+def track_record(fva: pd.DataFrame, level: str, country: str, metric: str, title: str, size=(6.4, 2.6)) -> bytes:
+    """Actual vs what we forecast 1 and 3 months before (walk-forward, last 12 months)."""
+    f = fva[(fva["Level"] == level) & (fva["Country"] == country) & (fva["Metric"] == metric)].copy()
+    f["Target_Month"] = pd.to_datetime(f["Target_Month"])
+    color = SERIES.get(metric)
+    fig, ax = plt.subplots(figsize=size)
+    fig.patch.set_facecolor(SURFACE)
+    _style(ax)
+    _kfmt(ax)
+    act = f.groupby("Target_Month")["Actual"].first().sort_index().tail(12)
+    ax.plot(act.index, act.values, color=INK_2, lw=2, marker="o", ms=3.2, label="Actual")
+    for ma, ls, lab in ((1, "-", "Forecast made 1 month before"), (3, "--", "Forecast made 3 months before")):
+        s = f[f["Months_Ahead"] == ma].groupby("Target_Month")["Forecast"].first().reindex(act.index)
+        if s.notna().any():
+            ax.plot(s.index, s.values, color=color, lw=1.6 if ma == 1 else 1.1, ls=ls, label=lab)
+    ax.set_ylim(bottom=0, top=max(float(act.max()) if len(act) else 1.0, 1.0) * 1.3)
+    _month_axis(ax)
+    ax.legend(fontsize=6, frameon=False, loc="upper left", ncols=3)
+    ax.set_title(title, fontsize=9, color=INK, loc="left")
+    return _png(fig)

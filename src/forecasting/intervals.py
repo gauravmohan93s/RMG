@@ -1,6 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Empirical, conformally calibrated prediction intervals.
+RETIRED FOR PRODUCTION RANGES (v2.2): the engine builds ranges with ``ranges.py``. From this module
+it uses only the shared helpers ``BLOCKS``, ``_qcols``, ``_enforce``, ``_wq``, ``RECENCY_HALF_LIFE`` and
+``apply_interval``. The conformal functions below are kept for reference and their tests; do not
+re-wire them into the engine without re-running the range method test (docs/METHODOLOGY.md §7).
+
+Empirical, conformally calibrated prediction intervals (v2.1 method).
 
 Monthly intervals
 1. Base quantiles: relative (log1p) errors of the combined forecast from the rolling-origin

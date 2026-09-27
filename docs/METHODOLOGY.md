@@ -110,6 +110,17 @@ totals (from the totals' own errors, since monthly ranges do not add up).
   was 0 / +304%. Bias corrections of the point forecast were tested and did not win (§7a), and the
   forecast errors changed sign between 2024–25 and 2025–26. Encoding that bias in the ranges would
   contradict the evidence.
+- **Ranges come from the forecasts as published.** For any reconciliation method, the backtest is
+  reconciled origin by origin with weights from errors known at the time (`reconcile.reconcile_backtest`).
+- **Effective sample size.** Consecutive k-month windows overlap, so n of them count as n/k independent
+  observations.
+  - A series' own spread is used only with at least 4 independent windows.
+  - The width factor needs at least 30 independent test results.
+  - Longer windows without enough own evidence use location-scale pooling: the series' own quarter
+    volatility × the pooled shape of k-month/quarter errors of comparable series.
+  - Ranges never narrow (in %) as the window lengthens.
+
+  See `docs/experiments/2026-09-27_long_horizon_and_ranges.md`.
 - **What width means.** A range can only be as narrow as the forecast is accurate. The 50% range is
   "most likely" and the 80% range is for planning. Narrower honest ranges require better point
   accuracy, for example leading indicators (ROADMAP).

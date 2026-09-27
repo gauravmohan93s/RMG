@@ -46,4 +46,25 @@ def test_published_backtest_sums_regions_for_aggregates():
     comb = pd.DataFrame([{"node_id": n, "o": 0, "h": 1, "t": 1, "Pred": p, "Actual": 1.0} for n, p in preds.items()])
     pub = rl.published_backtest(comb, nodes, "bottom_up").set_index("node_id")["Pred"]
     assert pub["R|A"] == 190.0 and pub["R|org"] == 300.0 and pub["R|A1"] == 100.0
-    assert rl.published_backtest(comb, nodes, "wls_var").equals(comb)
+    assert rl.published_backtest(comb, nodes, "none").equals(comb)
+
+
+def test_published_backtest_reconciles_for_other_methods():
+    """With wls_var the aggregates' backtest errors must be those of the RECONCILED (published) numbers:
+    coherent (aggregate = sum of its regions), not the aggregate's own unreconciled model."""
+    ids = [("Received|_ORG|_TOTAL", "Organisation", "_ORG", "_TOTAL"), ("Received|A|_TOTAL", "Country", "A", "_TOTAL"),
+           ("Received|A|1", "Region", "A", "1"), ("Received|A|2", "Region", "A", "2"), ("Received|B|1", "Region", "B", "1")]
+    nodes = pd.DataFrame([{"node_id": n, "Level": l, "Country": c, "Region": r, "Metric": "Received", "Status": "Mature"}
+                          for n, l, c, r in ids])
+    base = {"Received|_ORG|_TOTAL": 330.0, "Received|A|_TOTAL": 200.0, "Received|A|1": 100.0, "Received|A|2": 90.0,
+            "Received|B|1": 110.0}
+    rows = []
+    for o in range(6):
+        for h in (1, 2):
+            for n, p in base.items():
+                rows.append({"node_id": n, "o": o, "h": h, "t": o + h, "Pred": p * (1 + 0.01 * o), "Actual": p})
+    comb = pd.DataFrame(rows)
+    pub = rl.published_backtest(comb, nodes, "wls_var")
+    g = pub[(pub["o"] == 5) & (pub["h"] == 1)].set_index("node_id")["Pred"]
+    assert np.isclose(g["Received|A|_TOTAL"], g["Received|A|1"] + g["Received|A|2"])
+    assert np.isclose(g["Received|_ORG|_TOTAL"], g["Received|A|1"] + g["Received|A|2"] + g["Received|B|1"])

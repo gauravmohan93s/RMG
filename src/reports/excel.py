@@ -154,14 +154,14 @@ def write_workbook(res, path: Path) -> Path:
                         "New = too little history. Every series uses the most accurate method found; reliability is "
                         "about the market, not a weaker method. "
                        "new series and guardrail-capped series are always Low."),
-        ("How models were chosen", "Seventeen candidate methods were each tested on 24 past forecast origins over the full "
+        ("How models were chosen", f"Seventeen candidate methods were each tested on {ins.test_depth(res)['origins']} past forecast origins over the full "
                                    "12 months ahead. Ways of combining them were replayed walk-forward (Policy Comparison "
                                    "sheet); the equal-weight average of all methods won and is used. A series falls back to "
                                    "'same month last year' if the average did not beat it (Model Evidence sheet)."),
         ("Sheets", "Executive Summary · Country Outlook · Monthly Forecast · Fiscal Periods (for planning) — "
                    "Staffing Calendar · Seasonality · Forecast vs Actual · Statistical Overlay · Human Inputs · "
                    "Policy Events · Intake Profile (analysis) — Model Evidence · Model Scores · Accuracy by Horizon · Policy Comparison · "
-                   "Range Method Test · Interval Calibration · Model Catalogue · "
+                   "Health Check · Range Method Test · Interval Calibration · Model Catalogue · "
                    "Guardrails · Policy Overlay · Data Quality · Track Record · Run Manifest (for audit)."),
         ("Reproducibility", "Run Manifest records the code version (git commit), the data file fingerprint (SHA-256) "
                             "and every setting; the same inputs reproduce the same numbers."),
@@ -385,7 +385,7 @@ def write_workbook(res, path: Path) -> Path:
     if len(acc):
         pv = acc.pivot_table(index=["Level", "Metric", "h"], columns="Method", values="WAPE_Pct").reset_index()
         b.table("Accuracy by Horizon", pv, formats={c: "pct_plain" for c in pv.columns if c not in ("Level", "Metric", "h")},
-                note="Weighted absolute % error (WAPE) of forecasts made at the last 12 origins, by months ahead. "
+                note=f"Weighted absolute % error (WAPE) of forecasts made at the last {ins.test_depth(res)['wf']} origins, by months ahead. "
                      "'Selected method' is the walk-forward replay of the full procedure.")
     pc = res.policy_comparison
     if pc is not None and len(pc):
@@ -403,6 +403,10 @@ def write_workbook(res, path: Path) -> Path:
                 note="Walk-forward error (WAPE %) of each way of making regions, countries and the organisation add up; "
                      f"'none' = each level forecast on its own. Chosen: '{res.manifest.get('reconciliation_method_chosen', '')}'.")
     cal_fmt["Width_Factor"] = "dec"
+    b.table("Health Check", ins.health_check(res), widths={"Check": 42, "Target": 34, "Tested": 18, "Live": 22},
+            note="Acceptance checks fixed in advance and scored every month. Tested = forecasts re-made for past months "
+                 "with only the data then available; Live = published forecasts as their actuals arrive. Trust a use once "
+                 "the live column passes for 3 consecutive months.")
     rtest = getattr(res, "range_test", None)
     if rtest is not None and len(rtest):
         b.table("Range Method Test", rtest,
@@ -411,6 +415,13 @@ def write_workbook(res, path: Path) -> Path:
                      "with only the errors known at the time. Interval score = width + penalty for misses (lower is "
                      "better; a proper scoring rule). Chosen = used for that group and window. 'centred' = symmetric "
                      "around the forecast; 'empirical' = past error quantiles (may be skewed).")
+    rt2 = getattr(res, "range_tested", None)
+    if rt2 is not None and len(rt2):
+        b.table("Range Method Test", rt2, start_row=(len(rtest) + 5 if rtest is not None and len(rtest) else 0),
+                formats={"Tested_Coverage_Pct": "pct_plain", "Target_Pct": "", "N": ""},
+                note="Fully out-of-sample check of the whole range procedure: at each test origin the method and width "
+                     "were decided only from earlier realised results, then compared with what happened. "
+                     "Tested coverage should be close to the target.")
     b.table("Interval Calibration", res.calibration, formats=cal_fmt,
             note="Monthly ranges. Coverage = share of test actuals inside the range fitted only on earlier errors. "
                  "Width factor (0.8-1.5) scales both sides equally when coverage was clearly off target.")

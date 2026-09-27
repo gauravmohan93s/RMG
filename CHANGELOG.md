@@ -27,8 +27,37 @@ executive-readable brief, and region-specific staffing productivity.
 - **Point estimate `auto`**: a smearing-corrected mean is used only if it improves quarter totals
   across levels by ≥ 3% walk-forward. On 2026-09 data it did not (organisation better, countries
   worse), so the median is used.
-- The executive brief was rewritten in plain language; the Excel workbook gains a Range Method
-  Test sheet.
+- **Monthly forecast pack** (`src/reports/pdf.py`) replaces the text-heavy brief. It has a fixed
+  visual layout that is refilled every month:
+  - organisation dashboard;
+  - destinations at a glance (volume with range and reliability colour, and a growth sense-check of
+    forecast vs the last 6 months' actual growth);
+  - workload heatmap;
+  - track record;
+  - one page per destination, also saved as a separate PDF under `Reports/Countries/`;
+  - a fixed "how to read" page.
+
+  Numbers are written on the charts and in a 12-month strip, and every page footer carries the legend.
+- **Deeper, fully out-of-sample testing:**
+  - backtest origins 24 → 36; walk-forward test origins 12 → 24, covering both the 2024–25 dip and
+    the 2025–26 surge;
+  - new `range_tested_coverage.csv`: the whole range procedure (method choice and width factor)
+    replayed with only earlier realised results, so the reported coverage has no in-sample element.
+- **Ranges come from the published (reconciled) forecasts for every reconciliation method.** A
+  `wls_var` run had used unreconciled aggregate errors, so the organisation's 6-month range held 39%.
+  Also added: effective-sample-size rules for overlapping windows, location-scale pooling for long
+  windows, and monotone widening across 3/6/12 months. A 12-month planning range wider than the
+  forecast itself is labelled "direction only: plan on the next quarter".
+- Experiment: long-horizon blend toward last year's level was **rejected** (no consistent gain), and
+  12-month country misses of 34–42% were confirmed as real (policy shocks).
+  See `docs/experiments/2026-09-27_long_horizon_and_ranges.md`.
+- **Health check**: four acceptance criteria fixed in advance, scored on tested and live forecasts, in
+  the pack and in Excel.
+- **Data safeguard**: the latest month is flagged CRITICAL if its year-on-year change collapses or
+  jumps against the previous 3 months (partial extract); shown as a banner on page 1.
+- Report wording states the actual test depth. The retired v2.1 interval code is marked as such
+  (independent review findings).
+- The Excel workbook gains a Range Method Test sheet.
 
 ### Fixed
 - The published range always contains the point forecast (fixes a round-off at zero width).
