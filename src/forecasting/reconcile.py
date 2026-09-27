@@ -88,3 +88,59 @@ def node_variances(ids: List[str], resid_h1: pd.DataFrame, level_hint: pd.Series
         else:
             out.append(med * (float(lvl.get(nid, 0.0)) + 1.0) ** 2)
     return np.array(out)
+
+
+METHODS = ("none", "bottom_up", "wls_var", "mint_shrink")
+
+
+def walk_forward_test(honest: pd.DataFrame, comb: pd.DataFrame, nodes: pd.DataFrame, return_detail: bool = False):
+    """
+    Replay every reconciliation method on the walk-forward forecasts: at each evaluation origin e
+    the weights come only from one-step errors realised by e (targets <= e). Mature series only
+    (emerging series have no walk-forward forecasts). Returns WAPE by metric x level x method.
+    """
+    if honest is None or honest.empty:
+        return (pd.DataFrame(), pd.DataFrame()) if return_detail else pd.DataFrame()
+    meta = nodes.set_index("node_id")
+    resid = comb[comb["h"] == 1].assign(e=lambda d: d["Actual"] - d["Pred"])
+    out = []
+    for metric in ("Received", "Submitted"):
+        mn = nodes[(nodes["Metric"] == metric) & (nodes["Status"] == "Mature")]
+        if mn.empty:
+            continue
+        S, ids, _ = summing_matrix(mn)
+        h_m = honest[honest["node_id"].isin(ids)]
+        for (e, h), g in h_m.groupby(["o", "h"]):
+            g = g.set_index("node_id").reindex(ids)
+            if g["Policy"].isna().any():
+                continue
+            yhat = g["Policy"].to_numpy()[:, None]
+            act = g["Actual"].to_numpy()
+            past = resid[resid["t"] <= e]
+            var = node_variances(ids, past, pd.Series(yhat[:, 0], index=ids))
+            E = past.pivot_table(index="o", columns="node_id", values="e").reindex(columns=ids).dropna().to_numpy()
+            for method in METHODS:
+                if method == "none":
+                    yt, used = yhat, "none"
+                else:
+                    yt, used = reconcile(yhat, S, method, var=var, E=E if len(E) else None)
+                for i, nid in enumerate(ids):
+                    out.append((nid, metric, meta.loc[nid, "Level"], method, used, e, h, float(yt[i, 0]), float(act[i])))
+    if not out:
+        return (pd.DataFrame(), pd.DataFrame()) if return_detail else pd.DataFrame()
+    d = pd.DataFrame(out, columns=["node_id", "Metric", "Level", "Method", "Method_Used", "o", "h", "Pred", "Actual"])
+    d["AE"] = (d["Pred"] - d["Actual"]).abs()
+    d["Fell_Back"] = (d["Method_Used"] != d["Method"]).astype(float)
+    g = d.groupby(["Metric", "Level", "Method"])
+    res = (100 * g["AE"].sum() / g["Actual"].sum()).rename("WAPE_Pct").reset_index()
+    res["N"] = g.size().to_numpy()
+    res["Fell_Back_To_WLS_Pct"] = (100 * g["Fell_Back"].mean()).to_numpy()
+    return (res, d) if return_detail else res
+
+
+def choose_method(test: pd.DataFrame, candidates=("bottom_up", "wls_var", "mint_shrink")) -> str:
+    """Method with the lowest WAPE averaged over metric x level (each level counts equally)."""
+    t = test[test["Method"].isin(candidates)]
+    if t.empty:
+        return "wls_var"
+    return str(t.groupby("Method")["WAPE_Pct"].mean().idxmin())

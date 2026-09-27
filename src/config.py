@@ -31,6 +31,7 @@ DATA_ROOT: Path = Path(
     os.environ.get("RMG_DATA_ROOT") or _RAW["paths"].get("data_root") or DEFAULT_DATA_ROOT
 )
 RAW_FILE: Path = DATA_ROOT / _RAW["paths"]["raw_file"]
+INTAKE_FILE: Path = DATA_ROOT / _RAW["paths"].get("intake_file", "intake_final_summary.xlsx")
 SETTINGS_FILE: Path = DATA_ROOT / _RAW["paths"]["settings_file"]
 PREDICTIONS_ROOT: Path = DATA_ROOT / "Predictions"
 
@@ -80,6 +81,22 @@ class GuardCfg:
 
 
 @dataclass(frozen=True)
+class BiasCfg:
+    enabled: bool
+    window: int
+    max_h: int
+    min_gain_pct: float
+
+
+@dataclass(frozen=True)
+class SeasonalityCfg:
+    high_threshold: float
+    low_threshold: float
+    years: int
+    apps_per_fte_month: float
+
+
+@dataclass(frozen=True)
 class Settings:
     data: DataCfg
     backtest: BacktestCfg
@@ -90,6 +107,8 @@ class Settings:
     guardrails: GuardCfg
     overlay_sheet: str
     overlay_template: Path
+    bias_correction: BiasCfg
+    seasonality: SeasonalityCfg
     random_seed: int
     n_jobs: int
 
@@ -104,8 +123,8 @@ def load_settings(raw: Optional[Dict[str, Any]] = None) -> Settings:
     r = raw if raw is not None else _RAW
     if int(r["backtest"]["n_origins"]) < int(r["backtest"]["horizon"]):
         raise ValueError("backtest.n_origins must be >= backtest.horizon so every horizon is evaluated")
-    if r["selection"].get("policy", "mean_all") not in ("mean_all", "top_k"):
-        raise ValueError("selection.policy must be 'mean_all' or 'top_k'")
+    if r["selection"].get("policy", "mean_all") not in ("mean_all", "mean_screened", "top_k"):
+        raise ValueError("selection.policy must be 'mean_all', 'mean_screened' or 'top_k'")
     return Settings(
         data=DataCfg(
             drop_regions=tuple(r["data"]["drop_regions"]),
@@ -142,6 +161,18 @@ def load_settings(raw: Optional[Dict[str, Any]] = None) -> Settings:
         ),
         overlay_sheet=str(r["overlay"]["sheet"]),
         overlay_template=CODE_ROOT / r["overlay"]["template"],
+        bias_correction=BiasCfg(
+            enabled=bool(r.get("statistical_overlay", {}).get("enabled", True)),
+            window=int(r.get("statistical_overlay", {}).get("window_months", 6)),
+            max_h=int(r.get("statistical_overlay", {}).get("max_horizon", 3)),
+            min_gain_pct=float(r.get("statistical_overlay", {}).get("min_gain_pct", 1.0)),
+        ),
+        seasonality=SeasonalityCfg(
+            high_threshold=float(r.get("seasonality", {}).get("high_threshold", 1.10)),
+            low_threshold=float(r.get("seasonality", {}).get("low_threshold", 0.90)),
+            years=int(r.get("seasonality", {}).get("years", 4)),
+            apps_per_fte_month=float(r.get("seasonality", {}).get("apps_per_fte_month", 0)),
+        ),
         random_seed=int(r["runtime"]["random_seed"]),
         n_jobs=int(r["runtime"]["n_jobs"]),
     )

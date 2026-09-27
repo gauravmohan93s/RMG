@@ -6,6 +6,7 @@
 # Empty = default OneDrive location (override with env RMG_DATA_ROOT).
 data_root = ""
 raw_file = "monthly_final_summary.xlsx"
+intake_file = "intake_final_summary.xlsx"   # optional, descriptive intake view
 settings_file = "Settings.xlsx"
 
 [data]
@@ -25,7 +26,18 @@ n_origins = 24     # rolling forecast origins (the 24 month-ends before the late
 
 [models]
 # Candidate models (see src/forecasting/models.py). Order is irrelevant.
-enabled = ["SNaive", "SNaiveGrowth", "ETS", "Theta", "SARIMA_Airline", "TSB", "GlobalLGBM"]
+enabled = [
+  # benchmarks
+  "SNaive", "SNaiveGrowth",
+  # statistical
+  "ETS", "Theta", "SARIMA_Airline", "AutoARIMA", "STL_ETS", "ProphetStyle",
+  # intermittent demand
+  "TSB", "Croston",
+  # v1 month-on-month family (re-implemented leak-free)
+  "LastYear_MoM", "AvgMonthly_MoM", "YoY_MoM", "Rolling_MoM",
+  # machine learning (global, direct multi-horizon)
+  "GlobalLGBM", "GlobalXGB", "GlobalMLP",
+]
 
 [models.lgbm]
 n_estimators = 400
@@ -59,7 +71,9 @@ calibrate = true                 # conformal offsets so each tail hits nominal c
 max_offset = 1.5                 # cap on a conformal offset (log scale; 1.5 ~ x4.5)
 
 [reconciliation]
-method = "wls_var"               # "wls_var" | "mint_shrink" | "bottom_up"
+# "auto" = replay bottom_up / wls_var / mint_shrink walk-forward each run and use the most accurate
+# (2026-09-27: bottom_up 17.6% avg WAPE vs mint_shrink 17.8%, wls_var 18.0%, none 19.4%)
+method = "auto"                  # "auto" | "bottom_up" | "wls_var" | "mint_shrink"
 
 [guardrails]
 # Plausible 12-month total = [min_ratio x min(ref), max_ratio x max(ref)] where the
@@ -68,6 +82,21 @@ method = "wls_var"               # "wls_var" | "mint_shrink" | "bottom_up"
 # not genuine growth).
 min_ratio = 0.5
 max_ratio = 1.8
+
+[statistical_overlay]
+# Recent-bias (level-shift) correction estimated from realised errors, empirical-Bayes
+# shrunk; adopted only if it lowers walk-forward WAPE by at least min_gain_pct (relative %).
+enabled = true
+window_months = 6
+max_horizon = 3
+min_gain_pct = 1.0
+
+[seasonality]
+# Month classes for staffing: High if index >= high_threshold, Low if <= low_threshold.
+high_threshold = 1.10
+low_threshold = 0.90
+years = 4                        # most recent years used for the seasonal index
+apps_per_fte_month = 0           # set (e.g. 120) to convert volumes into FTE; 0 = off
 
 [overlay]
 # Business adjustments; only rows with Status = "Approved" are applied.

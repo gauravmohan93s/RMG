@@ -6,8 +6,9 @@ Score  = horizon-balanced MAE: the MAE at each horizon h=1..12 (over all origins
          averaged across horizons, so a model that is good next month but explodes
          at month 9 cannot win.
 Policy = how a node's forecast is formed from the candidates:
-         ``mean_all`` equal-weight average of every eligible model (default), or
-         ``top_k``    equal-weight average of the best k that beat the benchmark.
+         ``mean_all``      equal-weight average of every eligible model,
+         ``mean_screened`` equal-weight average of every model that beats the benchmark, or
+         ``top_k``         equal-weight average of the best k that beat the benchmark.
          Equal-weight averaging is robust to selection noise (the "forecast
          combination puzzle"; M3/M4 evidence) — and on this data it won the
          walk-forward comparison (docs/experiments/2026-09-27_combination_policy.md).
@@ -25,10 +26,11 @@ import pandas as pd
 
 MIN_KNOWN_PAIRS = 12
 H_BUCKETS = {"1-3": (1, 3), "4-6": (4, 6), "7-12": (7, 12)}
-POLICIES = ("mean_all", "top_k")
+POLICIES = ("mean_all", "mean_screened", "top_k")
 METHOD_LABELS = {
     "Policy": "Selected method (walk-forward)",
     "Mean_All": "Equal-weight mean of all models",
+    "Mean_Screened": "Mean of models beating benchmark",
     "Top_K": "Top-k combination",
     "Best_Single": "Best single model",
     "Benchmark": "Seasonal naive (benchmark)",
@@ -89,6 +91,11 @@ def select_models(scores: pd.DataFrame, benchmark: str, top_k: int, must_beat: b
             reason = (f"Equal-weight average of all {len(chosen)} eligible models (policy validated walk-forward, "
                       f"see Policy Comparison). Backtest over {n_orig} rolling origins x 12 months; error relative "
                       f"to seasonal naive: {ranking}.")
+        elif policy == "mean_screened":
+            chosen = _choose(g, benchmark, len(g), True)
+            reason = (f"Equal-weight average of the {len(chosen)} of {len(g)} models that beat seasonal naive over "
+                      f"{n_orig} rolling origins x 12 months (policy validated walk-forward, see Policy Comparison). "
+                      f"Error relative to seasonal naive: {ranking}.")
         else:
             chosen = _choose(g, benchmark, top_k, must_beat)
             if chosen == [benchmark] and (len(g) == 1 or rel.drop(benchmark, errors="ignore").min() > 1):
@@ -139,23 +146,26 @@ def honest_evaluation(preds: pd.DataFrame, benchmark: str, top_k: int, must_beat
         for e in origins[-n_eval_origins:]:
             known = (o_idx < e) & (t_idx <= e)
             if known.sum() < MIN_KNOWN_PAIRS:
-                chosen, best = [benchmark], benchmark
+                chosen, screened, best = [benchmark], [benchmark], benchmark
             else:
                 hb = ae[known].groupby(h_idx[known]).mean().mean()
                 tbl = pd.DataFrame({"Model": hb.index, "HB_MAE": hb.values})
                 tbl["Rel_to_Benchmark"] = tbl["HB_MAE"] / hb[benchmark] if hb[benchmark] > 0 else np.nan
                 tbl = tbl.sort_values("HB_MAE")
                 chosen = _choose(tbl, benchmark, top_k, must_beat)
+                screened = _choose(tbl, benchmark, len(tbl), True)
                 best = tbl["Model"].iloc[0]
             at = o_idx == e
             w = wide[at]
             mean_all = w.mean(axis=1).to_numpy()
             top = w[chosen].mean(axis=1).to_numpy()
+            scr = w[screened].mean(axis=1).to_numpy()
             out.append(pd.DataFrame({
                 "node_id": nid, "o": e, "h": h_idx[at], "t": t_idx[at],
                 "Actual": act[at].to_numpy(),
-                "Policy": mean_all if policy == "mean_all" else top,
+                "Policy": {"mean_all": mean_all, "mean_screened": scr}.get(policy, top),
                 "Mean_All": mean_all,
+                "Mean_Screened": scr,
                 "Top_K": top,
                 "Best_Single": w[best].to_numpy(),
                 "Benchmark": w[benchmark].to_numpy(),
@@ -171,7 +181,7 @@ def policy_comparison(honest: pd.DataFrame, nodes: pd.DataFrame) -> pd.DataFrame
     meta = nodes.set_index("node_id")[["Level", "Metric"]]
     hz = honest.join(meta, on="node_id")
     hz["Bucket"] = pd.cut(hz["h"], [0, 3, 6, 12], labels=list(H_BUCKETS))
-    cols = [c for c in ("Mean_All", "Top_K", "Best_Single", "Benchmark") if c in hz.columns]
+    cols = [c for c in ("Mean_All", "Mean_Screened", "Top_K", "Best_Single", "Benchmark") if c in hz.columns]
     rows = []
     for (lvl, met, b), g in hz.groupby(["Level", "Metric", "Bucket"], observed=True):
         den = g["Actual"].sum()
