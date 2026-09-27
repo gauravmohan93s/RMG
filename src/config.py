@@ -1,125 +1,156 @@
 # -*- coding: utf-8 -*-
 """
-Global configuration for RMG pipeline.
-- Cross-platform paths
-- Safe environment variable overrides
-- Reproducibility knobs (seed, horizon, etc.)
-- One place to tweak run-level settings
-"""
+Run configuration.
 
+Values come from ``config/pipeline.toml`` (override the file with env ``RMG_CONFIG``).
+Paths can be overridden with ``RMG_DATA_ROOT`` and ``RMG_OUT_DIR``.
+Importing this module has no side effects (no folders are created).
+"""
 from __future__ import annotations
 
-import os
 import datetime as dt
+import os
+import tomllib
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional, Tuple
 
-# ─────────────────────────────────────────────────────────────────────
-# Small helpers
-# ─────────────────────────────────────────────────────────────────────
-def _env_bool(name: str, default: bool) -> bool:
-    """Read boolean env var with common truthy/falsey strings."""
-    val = os.environ.get(name)
-    if val is None:
-        return default
-    return str(val).strip().lower() in {"1", "true", "yes", "y", "on"}
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, default))
-    except Exception:
-        return default
-
-def _env_str(name: str, default: str) -> str:
-    return os.environ.get(name, default)
-
-def _mk(parent: Path) -> Path:
-    parent.mkdir(parents=True, exist_ok=True)
-    return parent
-
-# ─────────────────────────────────────────────────────────────────────
-# ROOTS & DATA LOCATIONS
-#   You can override these via environment variables for CI/servers:
-#   - RMG_DATA_ROOT
-#   - RMG_OUT_DIR
-# ─────────────────────────────────────────────────────────────────────
-# Repo root (…/src/..)
 CODE_ROOT: Path = Path(__file__).resolve().parents[1]
-
-# Data root (user default, but overrideable)
-# Adjusted to be relative to the project root
+CONFIG_FILE: Path = Path(os.environ.get("RMG_CONFIG", CODE_ROOT / "config" / "pipeline.toml"))
 DEFAULT_DATA_ROOT = Path(r"C:\Users\gsakhare\OneDrive - KC OVERSEAS EDUCATION PVT LTD\RMG\RMG Calculations")
-DATA_ROOT: Path = Path(_env_str("RMG_DATA_ROOT", str(DEFAULT_DATA_ROOT)))
 
-# Input files (keep names centralized)
-RAW_FILE:  Path = DATA_ROOT / "monthly_final_summary.xlsx"
-EXOG_FILE: Path = DATA_ROOT / "external_regressors.xlsx"
 
-# ─────────────────────────────────────────────────────────────────────
-# RUN OUTPUT FOLDERS
-# - Default OUT_DIR → {DATA_ROOT}/Predictions/{YYYY-MM-DD}_{tag}
-# - You can fully override with RMG_OUT_DIR
-# - Optional RMG_RUN_TAG to append a short suffix (e.g., "debug", "A/B")
-# ─────────────────────────────────────────────────────────────────────
-def get_out_dir(base: Optional[Path] = None, tag: Optional[str] = None) -> Path:
-    base = base or (DATA_ROOT / "Predictions")
-    date_str = dt.date.today().isoformat()
-    suffix = f"_{tag}" if tag else ""
-    return base / f"{date_str}{suffix}"
+def _read_toml(path: Path) -> Dict[str, Any]:
+    with open(path, "rb") as fh:
+        return tomllib.load(fh)
 
-RUN_TAG = _env_str("RMG_RUN_TAG", "").strip() or None
 
-# Highest priority: explicit override
-_out_override = os.environ.get("RMG_OUT_DIR")
-if _out_override:
-    OUT_DIR: Path = Path(_out_override)
-else:
-    OUT_DIR: Path = get_out_dir(tag=RUN_TAG)
+_RAW: Dict[str, Any] = _read_toml(CONFIG_FILE)
 
-_mk(OUT_DIR)
+DATA_ROOT: Path = Path(
+    os.environ.get("RMG_DATA_ROOT") or _RAW["paths"].get("data_root") or DEFAULT_DATA_ROOT
+)
+RAW_FILE: Path = DATA_ROOT / _RAW["paths"]["raw_file"]
+SETTINGS_FILE: Path = DATA_ROOT / _RAW["paths"]["settings_file"]
+PREDICTIONS_ROOT: Path = DATA_ROOT / "Predictions"
 
-# Convenience subfolders used by several modules
-MODELS_DIR: Path      = _mk(OUT_DIR / "Models")
-EVAL_DIR: Path        = _mk(OUT_DIR / "Evaluation")
-FINAL_FC_DIR: Path    = _mk(OUT_DIR / "Final_Forecast")
-EDA_DIR: Path         = _mk(OUT_DIR / "EDA")          # EDA artefacts (mom_bands, need_diff, etc.)
-REPORTS_DIR: Path     = _mk(OUT_DIR / "Reports")      # Excel & PDF outputs root
-PDF_REPORTS_DIR: Path = _mk(REPORTS_DIR / "PDF")      # per-country and org-level PDFs
 
-# ─────────────────────────────────────────────────────────────────────
-# RUN-LEVEL SWITCHES (all env-overridable)
-#   RMG_FREQ, RMG_FIN_YEAR_START, RMG_HORIZON, RMG_RANDOM_SEED,
-#   RMG_ENABLE_EXOG, RMG_PARALLEL_JOBS
-# ─────────────────────────────────────────────────────────────────────
-FREQ: str           = _env_str("RMG_FREQ", "MS")           # monthly start (do not change casually)
-FIN_YEAR_START: int = _env_int("RMG_FIN_YEAR_START", 4)    # April–March FY
-HORIZON: int        = _env_int("RMG_HORIZON", 12)          # months ahead
-RANDOM_SEED: int    = _env_int("RMG_RANDOM_SEED", 42)
-ENABLE_EXOG: bool   = _env_bool("RMG_ENABLE_EXOG", False)  # flip on when regressors are clean
-PARALLEL_JOBS: int  = _env_int("RMG_PARALLEL_JOBS", -1)    # use all logical CPUs
+@dataclass(frozen=True)
+class DataCfg:
+    drop_regions: Tuple[str, ...]
+    inactive_months: int
+    min_months_for_tournament: int
+    fin_year_start_month: int
 
-# ─────────────────────────────────────────────────────────────────────
-# Loader/report-adjacent toggles (read in other modules)
-# (These are *documented* here but read where relevant.)
-#   RMG_INCLUDE_CURRENT_MONTH=1  → keep the in-progress month in loader
-#   RMG_CLIP_NONNEG=0/1          → clip negatives in core metrics to 0
-# ─────────────────────────────────────────────────────────────────────
 
-# ─────────────────────────────────────────────────────────────────────
-# Handy utility for fiscal-year labeling (shared by models)
-# ─────────────────────────────────────────────────────────────────────
-def fiscal_year(ts) -> int:
-    """Return fiscal year number given FIN_YEAR_START (e.g., 4 for April)."""
-    # Accepts pandas Timestamp or datetime.date
-    month = ts.month
-    year  = ts.year
-    return year if month < FIN_YEAR_START else year + 1
+@dataclass(frozen=True)
+class BacktestCfg:
+    horizon: int
+    n_origins: int
 
-# ─────────────────────────────────────────────────────────────────────
-# Sanity hints (non-fatal): useful when files move
-# ─────────────────────────────────────────────────────────────────────
-if not RAW_FILE.exists():
-    # Do not raise here; loader.py can provide clearer error messages.
-    print(f"[config] NOTE: RAW_FILE not found at {RAW_FILE}")
-if ENABLE_EXOG and not EXOG_FILE.exists():
-    print(f"[config] NOTE: EXOG_FILE not found at {EXOG_FILE} (ENABLE_EXOG=True)")
+
+@dataclass(frozen=True)
+class ModelCfg:
+    enabled: Tuple[str, ...]
+    lgbm: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SelectionCfg:
+    policy: str
+    benchmark: str
+    top_k: int
+    must_beat_benchmark: bool
+    honest_eval_origins: int
+    fallback_if_skill_below: float
+
+
+@dataclass(frozen=True)
+class IntervalCfg:
+    levels: Tuple[int, ...]
+    min_obs: int
+    calibrate: bool
+    max_calibration: float
+
+
+@dataclass(frozen=True)
+class GuardCfg:
+    min_ratio: float
+    max_ratio: float
+
+
+@dataclass(frozen=True)
+class Settings:
+    data: DataCfg
+    backtest: BacktestCfg
+    models: ModelCfg
+    selection: SelectionCfg
+    intervals: IntervalCfg
+    reconciliation_method: str
+    guardrails: GuardCfg
+    overlay_sheet: str
+    overlay_template: Path
+    random_seed: int
+    n_jobs: int
+
+    def as_dict(self) -> Dict[str, Any]:
+        d = asdict(self)
+        d["overlay_template"] = str(self.overlay_template)
+        return d
+
+
+def load_settings(raw: Optional[Dict[str, Any]] = None) -> Settings:
+    """Build typed settings from the TOML dict (or a dict passed in tests)."""
+    r = raw if raw is not None else _RAW
+    if int(r["backtest"]["n_origins"]) < int(r["backtest"]["horizon"]):
+        raise ValueError("backtest.n_origins must be >= backtest.horizon so every horizon is evaluated")
+    if r["selection"].get("policy", "mean_all") not in ("mean_all", "top_k"):
+        raise ValueError("selection.policy must be 'mean_all' or 'top_k'")
+    return Settings(
+        data=DataCfg(
+            drop_regions=tuple(r["data"]["drop_regions"]),
+            inactive_months=int(r["data"]["inactive_months"]),
+            min_months_for_tournament=int(r["data"]["min_months_for_tournament"]),
+            fin_year_start_month=int(r["data"]["fin_year_start_month"]),
+        ),
+        backtest=BacktestCfg(
+            horizon=int(r["backtest"]["horizon"]),
+            n_origins=int(r["backtest"]["n_origins"]),
+        ),
+        models=ModelCfg(
+            enabled=tuple(r["models"]["enabled"]),
+            lgbm=dict(r["models"].get("lgbm", {})),
+        ),
+        selection=SelectionCfg(
+            policy=str(r["selection"].get("policy", "mean_all")),
+            benchmark=str(r["selection"]["benchmark"]),
+            top_k=int(r["selection"]["top_k"]),
+            must_beat_benchmark=bool(r["selection"]["must_beat_benchmark"]),
+            honest_eval_origins=int(r["selection"]["honest_eval_origins"]),
+            fallback_if_skill_below=float(r["selection"]["fallback_if_skill_below"]),
+        ),
+        intervals=IntervalCfg(
+            levels=tuple(int(x) for x in r["intervals"]["levels"]),
+            min_obs=int(r["intervals"]["min_obs"]),
+            calibrate=bool(r["intervals"]["calibrate"]),
+            max_calibration=float(r["intervals"]["max_calibration"]),
+        ),
+        reconciliation_method=str(r["reconciliation"]["method"]),
+        guardrails=GuardCfg(
+            min_ratio=float(r["guardrails"]["min_ratio"]),
+            max_ratio=float(r["guardrails"]["max_ratio"]),
+        ),
+        overlay_sheet=str(r["overlay"]["sheet"]),
+        overlay_template=CODE_ROOT / r["overlay"]["template"],
+        random_seed=int(r["runtime"]["random_seed"]),
+        n_jobs=int(r["runtime"]["n_jobs"]),
+    )
+
+
+def run_dir(run_date: Optional[str] = None) -> Path:
+    """Output folder for a run: ``RMG_OUT_DIR`` or ``Predictions/<YYYY-MM-DD>``."""
+    override = os.environ.get("RMG_OUT_DIR")
+    if override:
+        return Path(override)
+    d = dt.date.fromisoformat(run_date) if run_date else dt.date.today()
+    return PREDICTIONS_ROOT / d.isoformat()

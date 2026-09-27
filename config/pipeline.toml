@@ -1,0 +1,79 @@
+# RMG application-flow forecasting — run configuration (v2)
+# Every value here is stamped into run_manifest.json so a run can be reproduced.
+# Change a value => it is a methodology change: note it in CHANGELOG.md.
+
+[paths]
+# Empty = default OneDrive location (override with env RMG_DATA_ROOT).
+data_root = ""
+raw_file = "monthly_final_summary.xlsx"
+settings_file = "Settings.xlsx"
+
+[data]
+# Regions excluded from forecasting (not organic application flow).
+drop_regions = ["B2C", "Test", "Unclaimed"]
+# A series with zero activity in the last N months is Inactive (not forecast).
+inactive_months = 6
+# Months of history a series needs to enter the rolling-origin tournament
+# (12 months of training at its first origin + at least 6 origins).
+min_months_for_tournament = 18
+# The fiscal year starts in April (FY27 = Apr-2026 .. Mar-2027).
+fin_year_start_month = 4
+
+[backtest]
+horizon = 12       # months ahead that are forecast AND evaluated
+n_origins = 24     # rolling forecast origins (the 24 month-ends before the latest actual)
+
+[models]
+# Candidate models (see src/forecasting/models.py). Order is irrelevant.
+enabled = ["SNaive", "SNaiveGrowth", "ETS", "Theta", "SARIMA_Airline", "TSB", "GlobalLGBM"]
+
+[models.lgbm]
+n_estimators = 400
+learning_rate = 0.03
+num_leaves = 15
+min_child_samples = 20
+subsample = 0.8
+colsample_bytree = 0.8
+reg_lambda = 1.0
+recency_half_life_months = 36
+
+[selection]
+# "mean_all" = equal-weight average of every eligible model (won the walk-forward
+# policy comparison, docs/experiments/2026-09-27_combination_policy.md);
+# "top_k"    = average of the best top_k models that beat the benchmark.
+# Both are re-evaluated every run (Policy Comparison sheet).
+policy = "mean_all"
+benchmark = "SNaive"             # reference every method is compared with
+top_k = 3
+must_beat_benchmark = true
+# Walk-forward (honest) evaluation of the selection policy on the last N origins.
+honest_eval_origins = 12
+# If the policy loses to the benchmark by more than this in the honest test,
+# the node falls back to the benchmark.
+fallback_if_skill_below = -0.05
+
+[intervals]
+levels = [80, 95]
+min_obs = 8                      # residuals needed per node/horizon, else pooled
+calibrate = true                 # widen to hit nominal coverage in the honest test
+max_calibration = 2.5
+
+[reconciliation]
+method = "wls_var"               # "wls_var" | "mint_shrink" | "bottom_up"
+
+[guardrails]
+# Plausible 12-month total = [min_ratio x min(ref), max_ratio x max(ref)] where the
+# references are last-12-month actuals and last-12 x recent 3-month YoY momentum.
+# Outside it the path is scaled to the bound and flagged (catches model failures,
+# not genuine growth).
+min_ratio = 0.5
+max_ratio = 1.8
+
+[overlay]
+# Business adjustments; only rows with Status = "Approved" are applied.
+sheet = "Policy_Overlay"
+template = "config/policy_overlay_template.csv"
+
+[runtime]
+random_seed = 42
+n_jobs = -1
