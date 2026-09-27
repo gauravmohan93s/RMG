@@ -1,28 +1,38 @@
-import os
-from pathlib import Path
-import pandas as pd
-from datetime import datetime, date, time, timedelta
-import pytz
-from urllib.parse import quote_plus
-from sqlalchemy import create_engine
+"""
+Fetch monthly application extracts from SQL Server (26th-25th reporting cycles).
 
-# Try to load settings from config if available, otherwise fallback
+Two incremental extracts (only fully closed, not-yet-fetched months are queried):
+  monthly_app_summary.xlsx     ReportMonth, CountryId, TagGroupID, Received/Submitted apps & students
+                               -> the forecasting input (unchanged)
+  monthly_intake_summary.xlsx  ReportMonth, CountryId, TagGroupID, Intake, InYear, Received/Submitted apps
+                               -> descriptive intake view (which intake each month's applications target)
+
+Credentials come ONLY from environment variables (or a local, git-ignored `.env` file in the
+repo root): DB_SERVER, DB_NAME, DB_USERNAME, DB_PASSWORD. Nothing secret is stored in code.
+"""
+import os
+from datetime import date, datetime, time, timedelta
+from pathlib import Path
+from urllib.parse import quote_plus
+
+import pandas as pd
+import pytz
+
 try:
     from src.config import DATA_ROOT
-    DEFAULT_OUTPUT_PATH = DATA_ROOT / "monthly_app_summary.xlsx"
 except Exception:
-    DEFAULT_OUTPUT_PATH = Path(r"C:\Users\gsakhare\OneDrive - KC OVERSEAS EDUCATION PVT LTD\RMG\RMG Calculations\monthly_app_summary.xlsx")
+    DATA_ROOT = Path(r"C:\Users\gsakhare\OneDrive - KC OVERSEAS EDUCATION PVT LTD\RMG\RMG Calculations")
 
 # -----------------------------------------------------------
-# 1) Operator inputs — set these if needed
+# 1) Operator inputs
 # -----------------------------------------------------------
 START_DATE_STR = '2020-01-01'   # YYYY-MM-DD (initial lower bound)
-END_DATE_STR   = ''             # '' => up to yesterday (IST)
-# OUTPUT_PATH absolute location as requested
-OUTPUT_PATH = Path(os.environ.get("RMG_OUTPUT_PATH", str(DEFAULT_OUTPUT_PATH)))
+END_DATE_STR   = ''             # '' => up to yesterday (IST), capped at the last closed cycle
+OUTPUT_PATH = Path(os.environ.get("RMG_OUTPUT_PATH", str(DATA_ROOT / "monthly_app_summary.xlsx")))
+INTAKE_OUTPUT_PATH = Path(os.environ.get("RMG_INTAKE_OUTPUT_PATH", str(DATA_ROOT / "monthly_intake_summary.xlsx")))
+FETCH_INTAKE = os.environ.get("RMG_FETCH_INTAKE", "1") != "0"
 
-
-# Per-country “submitted” stage overrides
+# Per-country "submitted" stage overrides
 COUNTRY_SUBMITTED_STAGES = {
     # e.g. 1: [4],
     #       2: [4,81],
@@ -40,123 +50,127 @@ def month_ranges(start_date: date, end_date: date):
       For ReportMonth='2025-07', start=2025-06-26 00:00:00, end=2025-07-25 23:59:59.
     """
     year, month = start_date.year, start_date.month
-
     while True:
-        # The cycle that ENDS on 25th of (year, month) starts on 26th of previous month
-        if month == 1:
-            prev_year, prev_month = year - 1, 12
-        else:
-            prev_year, prev_month = year, month - 1
-
+        prev_year, prev_month = (year - 1, 12) if month == 1 else (year, month - 1)
         period_start = date(prev_year, prev_month, 26)
-        period_end   = date(year, month, 25)
-
-        # If this cycle ended before our window starts, advance
+        period_end = date(year, month, 25)
         if period_end < start_date:
             year, month = (year + 1, 1) if month == 12 else (year, month + 1)
             continue
-
-        # If this cycle hasn't fully completed by end_date, STOP (no partial month)
         if period_end > end_date:
-            print(
-                f"⏭️  Skipping incomplete cycle {year:04d}-{month:02d} "
-                f"({period_start}→{period_end}); effective end date is {end_date}"
-            )
+            print(f"⏭️  Skipping incomplete cycle {year:04d}-{month:02d} "
+                  f"({period_start}→{period_end}); effective end date is {end_date}")
             break
-
-        # Clamp to overall start (start of cycle may be before our start_date)
         ms = datetime.combine(max(period_start, start_date), time(0, 0, 0))
-        me = datetime.combine(period_end, time(23,59,59))  # full completed cycle
-
+        me = datetime.combine(period_end, time(23, 59, 59))
         yield ms, me, f"{year}-{month:02d}"
-
-        # Next cycle (next calendar month)
         year, month = (year + 1, 1) if month == 12 else (year, month + 1)
 
 
 def last_closed_cycle_end(today_ist: date) -> date:
-    """
-    Return the most recent fully closed 26th→25th cycle end date.
-    Examples:
-      - 2026-02-26 -> 2026-02-25
-      - 2026-02-25 -> 2026-01-25
-    """
+    """Most recent fully closed 26th→25th cycle end (2026-02-26 -> 2026-02-25; 2026-02-25 -> 2026-01-25)."""
     if today_ist.day >= 26:
         return date(today_ist.year, today_ist.month, 25)
-
     if today_ist.month == 1:
         return date(today_ist.year - 1, 12, 25)
     return date(today_ist.year, today_ist.month - 1, 25)
 
 
-def build_monthly_sql(start_dt, end_dt, submitted_stages_dict, default_stages, report_month):
-    """
-    Monthly aggregation over your custom 26→25 window; output key is ReportMonth='YYYY-MM'
-    (the month of the cycle end day). Columns fully-qualified to avoid ambiguity.
-    """
-    s = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-    e = end_dt.strftime("%Y-%m-%d %H:%M:%S")
-    
-    # Build stage filter dynamically supporting per-country overrides
+def _stage_clause(submitted_stages_dict, default_stages) -> str:
     conditions = []
     for cid, stages in submitted_stages_dict.items():
         stage_list = ",".join(str(st) for st in stages)
         conditions.append(f"(avs.CountryId = {cid} AND ah.ApplicationStageId IN ({stage_list}))")
-    
     default_stage_list = ",".join(str(st) for st in default_stages)
     if submitted_stages_dict:
-        overridden_countries = ",".join(str(cid) for cid in submitted_stages_dict.keys())
-        conditions.append(f"(avs.CountryId NOT IN ({overridden_countries}) AND ah.ApplicationStageId IN ({default_stage_list}))")
+        overridden = ",".join(str(cid) for cid in submitted_stages_dict.keys())
+        conditions.append(f"(avs.CountryId NOT IN ({overridden}) AND ah.ApplicationStageId IN ({default_stage_list}))")
     else:
         conditions.append(f"ah.ApplicationStageId IN ({default_stage_list})")
-        
-    stage_where_clause = " AND (" + " OR ".join(conditions) + ")"
+    return " AND (" + " OR ".join(conditions) + ")"
 
+
+def build_monthly_sql(start_dt, end_dt, submitted_stages_dict, default_stages, report_month):
+    """Monthly aggregation over the 26→25 window; ReportMonth = month of the cycle end day."""
+    s = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+    e = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+    stage_where_clause = _stage_clause(submitted_stages_dict, default_stages)
     return f"""
 WITH
   Received AS (
-    SELECT
-      avs.CountryId,
-      avs.TagGroupID,
-      COUNT(DISTINCT avs.AcknowledgementNumber)    AS ReceivedApps,
-      COUNT(DISTINCT avs.StudentId)                AS ReceivedStudents
+    SELECT avs.CountryId, avs.TagGroupID,
+      COUNT(DISTINCT avs.AcknowledgementNumber) AS ReceivedApps,
+      COUNT(DISTINCT avs.StudentId)             AS ReceivedStudents
     FROM Application_View_Staff avs
     WHERE avs.CountryId IS NOT NULL
       AND DATEADD(MINUTE,330,avs.SubmittedDate) BETWEEN '{s}' AND '{e}'
-    GROUP BY
-      avs.CountryId, avs.TagGroupID
+    GROUP BY avs.CountryId, avs.TagGroupID
   ),
   Submitted AS (
-    SELECT
-      avs.CountryId,
-      avs.TagGroupID,
-      COUNT(DISTINCT ah.AcknowledgementId)    AS SubmittedApps,
-      COUNT(DISTINCT avs.StudentId)           AS SubmittedStudents
+    SELECT avs.CountryId, avs.TagGroupID,
+      COUNT(DISTINCT ah.AcknowledgementId) AS SubmittedApps,
+      COUNT(DISTINCT avs.StudentId)        AS SubmittedStudents
     FROM ApplicationHistory ah
-    JOIN Application_View_Staff avs
-      ON ah.AcknowledgementId = avs.AcknowledgementId
+    JOIN Application_View_Staff avs ON ah.AcknowledgementId = avs.AcknowledgementId
     WHERE avs.CountryId IS NOT NULL
       {stage_where_clause}
       AND DATEADD(MINUTE,330,ah.ChangedOn) BETWEEN '{s}' AND '{e}'
-    GROUP BY
-      avs.CountryId, avs.TagGroupID
+    GROUP BY avs.CountryId, avs.TagGroupID
   )
 SELECT
   '{report_month}' AS ReportMonth,
-  COALESCE(r.CountryId, s.CountryId)       AS CountryId,
-  COALESCE(r.TagGroupID, s.TagGroupID)     AS TagGroupID,
+  COALESCE(r.CountryId, s.CountryId)   AS CountryId,
+  COALESCE(r.TagGroupID, s.TagGroupID) AS TagGroupID,
   ISNULL(r.ReceivedApps,0)      AS ReceivedApps,
   ISNULL(r.ReceivedStudents,0)  AS ReceivedStudents,
   ISNULL(s.SubmittedApps,0)     AS SubmittedApps,
   ISNULL(s.SubmittedStudents,0) AS SubmittedStudents
-FROM (
-  SELECT CountryId, TagGroupID FROM Received
-  UNION
-  SELECT CountryId, TagGroupID FROM Submitted
-) AS d
+FROM (SELECT CountryId, TagGroupID FROM Received UNION SELECT CountryId, TagGroupID FROM Submitted) AS d
 LEFT JOIN Received  r ON d.CountryId=r.CountryId AND d.TagGroupID=r.TagGroupID
 LEFT JOIN Submitted s ON d.CountryId=s.CountryId AND d.TagGroupID=s.TagGroupID
 ORDER BY CountryId, ReportMonth, TagGroupID;
+"""
+
+
+def build_intake_sql(start_dt, end_dt, submitted_stages_dict, default_stages, report_month):
+    """Same windows and definitions as build_monthly_sql, additionally split by target Intake / InYear."""
+    s = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+    e = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+    stage_where_clause = _stage_clause(submitted_stages_dict, default_stages)
+    intake = "ISNULL(CAST(avs.Intake AS NVARCHAR(50)), '')"
+    inyear = "ISNULL(CAST(avs.InYear AS NVARCHAR(10)), '')"
+    return f"""
+WITH
+  Received AS (
+    SELECT avs.CountryId, avs.TagGroupID, {intake} AS Intake, {inyear} AS InYear,
+      COUNT(DISTINCT avs.AcknowledgementNumber) AS ReceivedApps
+    FROM Application_View_Staff avs
+    WHERE avs.CountryId IS NOT NULL
+      AND DATEADD(MINUTE,330,avs.SubmittedDate) BETWEEN '{s}' AND '{e}'
+    GROUP BY avs.CountryId, avs.TagGroupID, {intake}, {inyear}
+  ),
+  Submitted AS (
+    SELECT avs.CountryId, avs.TagGroupID, {intake} AS Intake, {inyear} AS InYear,
+      COUNT(DISTINCT ah.AcknowledgementId) AS SubmittedApps
+    FROM ApplicationHistory ah
+    JOIN Application_View_Staff avs ON ah.AcknowledgementId = avs.AcknowledgementId
+    WHERE avs.CountryId IS NOT NULL
+      {stage_where_clause}
+      AND DATEADD(MINUTE,330,ah.ChangedOn) BETWEEN '{s}' AND '{e}'
+    GROUP BY avs.CountryId, avs.TagGroupID, {intake}, {inyear}
+  )
+SELECT
+  '{report_month}' AS ReportMonth,
+  COALESCE(r.CountryId, s.CountryId)   AS CountryId,
+  COALESCE(r.TagGroupID, s.TagGroupID) AS TagGroupID,
+  COALESCE(r.Intake, s.Intake)         AS Intake,
+  COALESCE(r.InYear, s.InYear)         AS InYear,
+  ISNULL(r.ReceivedApps,0)  AS ReceivedApps,
+  ISNULL(s.SubmittedApps,0) AS SubmittedApps
+FROM Received r
+FULL OUTER JOIN Submitted s
+  ON r.CountryId=s.CountryId AND r.TagGroupID=s.TagGroupID AND r.Intake=s.Intake AND r.InYear=s.InYear
+ORDER BY CountryId, TagGroupID, Intake, InYear;
 """
 
 
@@ -167,113 +181,80 @@ def execute_query(sql, engine):
     return df
 
 
+def _load_env_file(path: Path) -> None:
+    """Minimal .env reader (KEY=VALUE lines); existing environment variables win."""
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+def make_engine():
+    from sqlalchemy import create_engine
+    _load_env_file(Path(__file__).resolve().parent / ".env")
+    missing = [k for k in ("DB_SERVER", "DB_NAME", "DB_USERNAME", "DB_PASSWORD") if not os.environ.get(k)]
+    if missing:
+        raise SystemExit(f"Missing database settings {missing}: set them as environment variables or in a "
+                         f"git-ignored .env file in the repo root (see SETUP_GUIDE.md).")
+    url = (f"mssql+pyodbc://{os.environ['DB_USERNAME']}:{quote_plus(os.environ['DB_PASSWORD'])}"
+           f"@{os.environ['DB_SERVER']}/{os.environ['DB_NAME']}"
+           "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes")
+    return create_engine(url)
+
+
+def fetch_missing(engine, sql_builder, output_path: Path, key_cols, start_date: date, end_date: date, label: str):
+    """Query only fully closed months not yet present in `output_path`, append and save."""
+    if output_path.exists():
+        existing = pd.read_excel(output_path, dtype=str)
+        if not {"ReportMonth", *key_cols}.issubset(existing.columns):
+            print(f"⚠️  {output_path.name} is missing key columns; starting fresh.")
+            existing = pd.DataFrame()
+    else:
+        existing = pd.DataFrame()
+    existing_months = set(existing["ReportMonth"].astype(str)) if len(existing) else set()
+    if existing_months:
+        y, m = map(int, max(existing_months).split("-"))
+        start_date = max(start_date, date(y, m, 26))
+    missing = [c for c in month_ranges(start_date, end_date) if c[2] not in existing_months]
+    if not missing:
+        print(f"ℹ️  [{label}] no missing closed months — nothing to fetch.")
+        return
+    new = []
+    for ms, me, mstr in missing:
+        print(f"\n-- [{label}] Month {mstr} ({ms.date()}→{me.date()}) --")
+        df = execute_query(sql_builder(ms, me, COUNTRY_SUBMITTED_STAGES, DEFAULT_SUBMITTED_STAGES, mstr), engine)
+        if len(df):
+            new.append(df.astype(str))
+    if not new:
+        print(f"ℹ️  [{label}] no new rows.")
+        return
+    combined = pd.concat([existing, *new], ignore_index=True) if len(existing) else pd.concat(new, ignore_index=True)
+    combined = combined.drop_duplicates(subset=["ReportMonth", *key_cols], keep="last")
+    combined.to_excel(output_path, index=False)
+    print(f"\n✅ [{label}] saved {sum(len(n) for n in new)} new rows to {output_path}")
+
+
 # -----------------------------------------------------------
-# 3) Main (MONTHLY, query ONLY missing & fully completed months)
+# 3) Main
 # -----------------------------------------------------------
 def main():
-    # parse dates
     start_date = datetime.strptime(START_DATE_STR, "%Y-%m-%d").date()
     ist = pytz.timezone("Asia/Kolkata")
     today_ist = datetime.now(ist).date()
     hard_cutoff = last_closed_cycle_end(today_ist)
-
-    if END_DATE_STR.strip():
-        requested_end_date = datetime.strptime(END_DATE_STR, "%Y-%m-%d").date()
-    else:
-        # keep legacy behavior as the requested upper bound
-        requested_end_date = (datetime.now(ist) - timedelta(days=1)).date()
-
-    # Hard guard: never allow fetching beyond the last fully closed 26->25 cycle.
-    end_date = min(requested_end_date, hard_cutoff)
-    print(f"ℹ️  Requested end date: {requested_end_date} | Effective end date: {end_date} | Hard cutoff: {hard_cutoff}")
-
-    # build connection
-    SERVER   = os.environ.get("DB_SERVER", '***REMOVED***')
-    DATABASE = os.environ.get("DB_NAME", '***REMOVED***')
-    USERNAME = os.environ.get("DB_USERNAME", '***REMOVED***')
-    PASSWORD = os.environ.get("DB_PASSWORD", '***REMOVED***')
-    pwd_enc  = quote_plus(PASSWORD)
-    CONNECTION_URL = (
-        f"mssql+pyodbc://{USERNAME}:{pwd_enc}@{SERVER}/{DATABASE}"
-        "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes"
-    )
-    engine = create_engine(CONNECTION_URL)
-
-    # load existing (monthly) and build skip sets
-    cols = ["ReportMonth","CountryId","TagGroupID",
-            "ReceivedApps","ReceivedStudents","SubmittedApps","SubmittedStudents"]
-    if os.path.exists(OUTPUT_PATH):
-        existing = pd.read_excel(OUTPUT_PATH, dtype=str)
-        if not set(["ReportMonth","CountryId","TagGroupID"]).issubset(existing.columns):
-            print("⚠️  Existing file missing key columns; starting fresh monthly sheet.")
-            existing = pd.DataFrame(columns=cols)
-    else:
-        existing = pd.DataFrame(columns=cols)
-
-    if len(existing):
-        existing["ReportMonth"] = existing["ReportMonth"].astype(str)
-        existing["CountryId"]   = existing["CountryId"].astype(int)
-        existing["TagGroupID"]  = existing["TagGroupID"].astype(int)
-        existing_months = set(existing["ReportMonth"].unique())
-        skip_keys = set(zip(existing["ReportMonth"], existing["CountryId"], existing["TagGroupID"]))
-    else:
-        existing_months = set()
-        skip_keys = set()
-
-    # --- OPTIONAL ACCELERATION ---
-    # If you already have months, move start_date to the next cycle after the latest ReportMonth (26th of that month)
-    if existing_months:
-        last_month_str = max(existing_months)  # 'YYYY-MM'
-        y, m = map(int, last_month_str.split("-"))
-        next_cycle_start = date(y, m, 26)  # day after that cycle's end-of-month window starts
-        if next_cycle_start > start_date:
-            start_date = next_cycle_start
-
-    # Build only **fully completed** cycles and then filter to **missing** months
-    all_cycles = list(month_ranges(start_date, end_date))  # [(ms, me, 'YYYY-MM'), ...] completed only
-    missing_cycles = [t for t in all_cycles if t[2] not in existing_months]
-
-    if not missing_cycles:
-        print("\nℹ️  No missing full months detected — nothing to fetch.")
-        return
-
-    # fetch ONLY missing full months in bulk (all countries in a single query per cycle)
-    all_new   = []
-    for ms, me, mstr in missing_cycles:
-        print(f"\n-- Month {mstr} ({ms.date()}→{me.date()}) --")
-        df = execute_query(build_monthly_sql(ms, me, COUNTRY_SUBMITTED_STAGES, DEFAULT_SUBMITTED_STAGES, mstr), engine)
-
-        if df.empty:
-            print("   ↳ no rows")
-            continue
-
-        # Guard: skip any row that already exists (in case partial prior data)
-        if skip_keys:
-            df = df.loc[
-                [ (r.ReportMonth, r.CountryId, r.TagGroupID) not in skip_keys
-                  for r in df.itertuples() ]
-            ]
-        if df.empty:
-            print("   ↳ no new rows")
-            continue
-
-        for r in df.itertuples():
-            skip_keys.add((r.ReportMonth, r.CountryId, r.TagGroupID))
-        all_new.append(df)
-        print(f"   ↳ {len(df)} new rows")
-
-    # write back (monthly sheet)
-    if all_new:
-        new_df   = pd.concat(all_new, ignore_index=True)
-        combined = pd.concat([existing, new_df], ignore_index=True)
-        combined.drop_duplicates(
-            subset=["ReportMonth","CountryId","TagGroupID"],
-            keep="last", inplace=True
-        )
-        combined.to_excel(OUTPUT_PATH, index=False)
-        print(f"\n✅ Saved {len(new_df)} new rows to {OUTPUT_PATH}")
-    else:
-        print("\nℹ️  No new data to append.")
+    requested_end = (datetime.strptime(END_DATE_STR, "%Y-%m-%d").date() if END_DATE_STR.strip()
+                     else (datetime.now(ist) - timedelta(days=1)).date())
+    end_date = min(requested_end, hard_cutoff)       # never beyond the last fully closed 26->25 cycle
+    print(f"ℹ️  Requested end date: {requested_end} | Effective end date: {end_date} | Hard cutoff: {hard_cutoff}")
+    engine = make_engine()
+    fetch_missing(engine, build_monthly_sql, OUTPUT_PATH, ["CountryId", "TagGroupID"], start_date, end_date, "monthly")
+    if FETCH_INTAKE:
+        fetch_missing(engine, build_intake_sql, INTAKE_OUTPUT_PATH, ["CountryId", "TagGroupID", "Intake", "InYear"],
+                      start_date, end_date, "intake")
 
 
 if __name__ == "__main__":
