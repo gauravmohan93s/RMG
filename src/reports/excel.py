@@ -210,10 +210,15 @@ def write_workbook(res, path: Path) -> Path:
                          "Pct_Series_Beating_Benchmark": "pct_plain", "N": ""},
                 note="Walk-forward test of each way of forming the forecast (re-run every month). The configured policy "
                      f"is '{ins.policy_label(res)}'. Bias < 0 = actuals above forecast.")
-    b.table("Interval Calibration", res.calibration,
-            formats={"Factor": "dec", "Coverage_Before_Pct": "pct_plain", "Coverage_After_Pct": "pct_plain",
-                     "Target_Pct": "", "N": ""},
-            note="Share of walk-forward actuals inside the range. Factor = widening applied so coverage reaches the target.")
+    cal_fmt = {"Offset_Lo": "dec", "Offset_Hi": "dec", "Offset_Lo_z": "dec", "Offset_Hi_z": "dec",
+               "Coverage_Before_Pct": "pct_plain", "Coverage_After_Pct": "pct_plain", "Target_Pct": "", "N": ""}
+    b.table("Interval Calibration", res.calibration, formats=cal_fmt,
+            note="Monthly ranges. Coverage = share of walk-forward actuals inside the range, measured with ranges "
+                 "fitted only on earlier errors. Offsets (log scale) are added to each tail so it reaches its target.")
+    bc = getattr(res, "block_calibration", None)
+    if bc is not None and len(bc):
+        b.table("Interval Calibration", bc, formats=cal_fmt, start_row=len(res.calibration) + 5,
+                note="Ranges for next 3/6/12-month totals (offsets in standardised units).")
     b.table("Model Catalogue", res.catalogue, widths={"Description": 90},
             formats={"Median_Error_vs_Benchmark": "dec", "Pct_Series_Beating_Benchmark": "pct_plain",
                      "Min_History_Months": "", "Series_Using_Model": ""})

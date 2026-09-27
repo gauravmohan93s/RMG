@@ -55,8 +55,8 @@ fallback_if_skill_below = -0.05
 [intervals]
 levels = [80, 95]
 min_obs = 8                      # residuals needed per node/horizon, else pooled
-calibrate = true                 # widen to hit nominal coverage in the honest test
-max_calibration = 2.5
+calibrate = true                 # conformal offsets so each tail hits nominal coverage walk-forward
+max_offset = 1.5                 # cap on a conformal offset (log scale; 1.5 ~ x4.5)
 
 [reconciliation]
 method = "wls_var"               # "wls_var" | "mint_shrink" | "bottom_up"

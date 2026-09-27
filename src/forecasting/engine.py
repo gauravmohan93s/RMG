@@ -55,6 +55,7 @@ class RunResult:
     accuracy: pd.DataFrame
     policy_comparison: pd.DataFrame
     calibration: pd.DataFrame
+    block_calibration: pd.DataFrame
     guardrails: pd.DataFrame
     overlay_rules: pd.DataFrame
     catalogue: pd.DataFrame
@@ -78,6 +79,7 @@ ARTEFACTS = {
     "accuracy": "Evaluation/accuracy_by_horizon.csv",
     "policy_comparison": "Evaluation/policy_comparison.csv",
     "calibration": "Evaluation/interval_calibration.csv",
+    "block_calibration": "Evaluation/total_interval_calibration.csv",
     "guardrails": "Evaluation/guardrails.csv",
     "catalogue": "Evaluation/model_catalogue.csv",
     "failures": "Evaluation/model_failures.csv",
@@ -188,20 +190,28 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
 
     # 5) intervals ──────────────────────────────────────────────────────────
     q, pooled = iv.residual_quantiles(comb_bt, tour, levels, settings.intervals.min_obs, H)
-    q, calib = iv.calibrate(q, honest, nodes, levels, settings.intervals.max_calibration,
-                            settings.intervals.calibrate)
+    # split-conformal: the calibration check uses quantiles fitted only on errors realised
+    # before the walk-forward window, so tested errors never helped build the interval
+    q_fit, early = None, None
+    if not honest.empty:
+        early = comb_bt[comb_bt["t"] <= honest["o"].min()]
+        if len(early):
+            q_fit, _ = iv.residual_quantiles(early, tour, levels, settings.intervals.min_obs, H)
+    q, calib = iv.calibrate(q, honest, nodes, levels, settings.intervals.max_offset,
+                            settings.intervals.calibrate, q_fit=q_fit)
     extra = []
     for _, n in emer.iterrows():
         for h in range(1, H + 1):
             qq, nn = iv.pooled_quantiles(pooled, n["Metric"], n["Level"], h)
             row = {"node_id": n["node_id"], "h": h, "Source": "pooled (emerging)", "N": nn}
             for L in levels:
-                fct = iv.calibration_factor(calib, n["Metric"], n["Level"], L)
-                row[f"q_lo{L}"], row[f"q_hi{L}"] = qq[f"q_lo{L}"] * fct, qq[f"q_hi{L}"] * fct
+                d_lo, d_hi = iv.calibration_offsets(calib, n["Metric"], n["Level"], h, L)
+                row[f"q_lo{L}"], row[f"q_hi{L}"] = qq[f"q_lo{L}"] - d_lo, qq[f"q_hi{L}"] + d_hi
             extra.append(row)
     if extra:
         q = iv._enforce(pd.concat([q, pd.DataFrame(extra)], ignore_index=True), levels)
-    bq = iv.block_quantiles(comb_bt, nodes, levels, settings.intervals.min_obs, calib)
+    bq, block_calib = iv.block_quantiles(comb_bt, nodes, levels, settings.intervals.min_obs, honest,
+                                         settings.intervals.max_offset, comb_fit=early)
     lap("intervals")
 
     # 6) reconciliation ─────────────────────────────────────────────────────
@@ -295,7 +305,7 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
     res = RunResult(out_dir=out_dir, run_id=run_id, run_date=run_date, last_actual=last_actual,
                     forecast=fc, totals=totals, periods=periods, history=panel.history, nodes=nodes,
                     series_status=panel.series_status, dq=panel.dq, scores=scores, selection=selection,
-                    accuracy=accuracy, policy_comparison=policy_cmp, calibration=calib, guardrails=guards, overlay_rules=rules,
+                    accuracy=accuracy, policy_comparison=policy_cmp, calibration=calib, block_calibration=block_calib, guardrails=guards, overlay_rules=rules,
                     catalogue=catalogue, failures=bt.failures, track_scorecard=track_sc, manifest=manifest)
     save_result(res, bt.preds, honest)
     lap("save")
@@ -408,7 +418,7 @@ def _periods(fc: pd.DataFrame, history: pd.DataFrame, fy_start: int) -> pd.DataF
                 continue            # incomplete period or entirely in the past
             act = [d for d in ds if d < first_fc]
             fcs = [d for d in ds if d >= first_fc]
-            a = float(sum(hist.get((*key, d), 0.0) for d in act))
+            a = float(sum(hist.get((*key, d), np.nan) for d in act))   # missing -> unknown, not 0
             fsum = float(f.loc[fcs, "Forecast"].sum())
             fadj = float(f.loc[fcs, "Forecast_Adjusted"].sum())
             ly = float(sum(hist.get((*key, d - pd.DateOffset(years=1)), np.nan) for d in ds))

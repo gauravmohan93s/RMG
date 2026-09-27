@@ -153,9 +153,15 @@ def write_brief(res, path: Path) -> Path:
                             "bias < 0 means actuals came in above the forecast.", S["small"])]
     cal = res.calibration
     if len(cal):
-        c80 = cal[(cal["Interval"] == "80%") & (cal["Level"] == "Organisation")]
-        cov = ", ".join(f"{r.Metric} {r.Coverage_After_Pct:.0f}%" for r in c80.itertuples())
-        cal_txt = f"The 80% ranges contained the actual in: {cov} of walk-forward tests at organisation level (target 80%)."
+        c80 = cal[cal["Interval"] == "80%"]
+        parts = []
+        for m, g in c80.groupby("Metric"):
+            before = np.average(g["Coverage_Before_Pct"], weights=g["N"])
+            after = np.average(g["Coverage_After_Pct"], weights=g["N"])
+            parts.append(f"{m} {before:.0f}% before → {after:.0f}% after calibration")
+        cal_txt = ("Monthly 80% ranges, tested on the last 12 months with ranges built only from earlier errors, "
+                   "contained the actual: " + "; ".join(parts) + " (target 80%). The widening is mostly on the "
+                   "upside, because recent actuals ran above forecasts.")
     else:
         cal_txt = ""
     guard = int(res.guardrails["Guardrail_Triggered"].sum()) if len(res.guardrails) else 0

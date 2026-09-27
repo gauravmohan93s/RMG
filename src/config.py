@@ -70,7 +70,7 @@ class IntervalCfg:
     levels: Tuple[int, ...]
     min_obs: int
     calibrate: bool
-    max_calibration: float
+    max_offset: float
 
 
 @dataclass(frozen=True)
@@ -133,7 +133,7 @@ def load_settings(raw: Optional[Dict[str, Any]] = None) -> Settings:
             levels=tuple(int(x) for x in r["intervals"]["levels"]),
             min_obs=int(r["intervals"]["min_obs"]),
             calibrate=bool(r["intervals"]["calibrate"]),
-            max_calibration=float(r["intervals"]["max_calibration"]),
+            max_offset=float(r["intervals"]["max_offset"]),
         ),
         reconciliation_method=str(r["reconciliation"]["method"]),
         guardrails=GuardCfg(

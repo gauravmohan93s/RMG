@@ -30,16 +30,45 @@ def test_quantiles_contain_point_widen_and_nest():
         assert (np.diff(g["q_hi80"]) >= -1e-12).all() and (np.diff(g["q_lo80"]) <= 1e-12).all()
 
 
-def test_calibration_widens_to_nominal_coverage():
+def _band_rows(cal, L=80):
+    return cal[cal["Interval"] == f"{L}%"]
+
+
+def test_conformal_calibration_reaches_nominal_coverage():
     comb, nodes = residual_frame()
     q, _ = iv.residual_quantiles(comb, nodes, LEVELS, min_obs=8, horizon=12)
-    # honest errors twice as large as the in-sample ones
-    rng = np.random.default_rng(1)
+    rng = np.random.default_rng(1)                         # walk-forward errors twice as large
     hz = comb.rename(columns={"Pred": "Policy"}).copy()
     hz["Actual"] = hz["Policy"] * np.exp(rng.normal(0, 0.10 * np.sqrt(hz["h"])))
-    q2, cal = iv.calibrate(q, hz, nodes, LEVELS, max_factor=3.0)
-    row = cal[cal["Interval"] == "80%"].iloc[0]
-    assert row["Factor"] > 1.0 and row["Coverage_After_Pct"] >= 80 > row["Coverage_Before_Pct"]
+    _, cal = iv.calibrate(q, hz, nodes, LEVELS, max_offset=1.5)
+    rows = _band_rows(cal)
+    assert (rows["Coverage_After_Pct"] >= 80).all() and (rows["Coverage_Before_Pct"] < 80).all()
+    assert (rows["Offset_Hi"] > 0).all() and (rows["Offset_Lo"] > 0).all()
+
+
+def test_conformal_widens_a_collapsed_tail_after_a_bias_flip():
+    """Upper quantile at 0 (history over-forecast), then actuals run 20% above: hi must widen."""
+    comb, nodes = residual_frame()
+    q, _ = iv.residual_quantiles(comb, nodes, LEVELS, min_obs=8, horizon=12)
+    q[["q_hi80", "q_hi95"]] = 0.0
+    hz = comb.rename(columns={"Pred": "Policy"}).copy()
+    hz["Actual"] = hz["Policy"] * 1.2
+    q2, cal = iv.calibrate(q, hz, nodes, LEVELS, max_offset=1.5)
+    expected = np.log1p(hz["Actual"]) - np.log1p(hz["Policy"])
+    assert (q2["q_hi80"].to_numpy() >= expected.max() - 1e-9).all()
+
+
+def test_calibration_measures_coverage_with_out_of_sample_quantiles():
+    """Offsets must be measured with q_fit (fitted before the test window), then added to q."""
+    comb, nodes = residual_frame()
+    q, _ = iv.residual_quantiles(comb, nodes, LEVELS, min_obs=8, horizon=12)
+    hz = comb.rename(columns={"Pred": "Policy"})
+    narrow = q.copy()
+    narrow[iv._qcols(LEVELS)] *= 0.5                       # an interval that under-covers
+    _, cal_in = iv.calibrate(q, hz, nodes, LEVELS, max_offset=1.5)
+    q2, cal_out = iv.calibrate(q, hz, nodes, LEVELS, max_offset=1.5, q_fit=narrow)
+    assert (_band_rows(cal_out)["Offset_Hi"].to_numpy() > _band_rows(cal_in)["Offset_Hi"].to_numpy()).all()
+    assert (q2["q_hi80"].to_numpy() >= q["q_hi80"].to_numpy() - 1e-12).all()
 
 
 def test_apply_interval_orders_bounds():
@@ -49,7 +78,7 @@ def test_apply_interval_orders_bounds():
 
 def test_block_quantiles_are_pooled_and_signed():
     comb, nodes = residual_frame()
-    bq = iv.block_quantiles(comb, nodes, LEVELS, min_obs=8, calib=pd.DataFrame())
+    bq, _ = iv.block_quantiles(comb, nodes, LEVELS, min_obs=8)
     assert set(bq["k"]) == {3, 6, 12}
     assert (bq["q_lo80"] <= 0).all() and (bq["q_hi80"] >= 0).all()
     assert bq["Source"].str.contains("scale").all()

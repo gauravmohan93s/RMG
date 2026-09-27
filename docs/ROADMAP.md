@@ -29,17 +29,29 @@ Goal: numbers an executive can use, with evidence for every choice.
 | 14 | pytest suite: leakage, intervals, reconciliation, guardrails, overlay, data prep | 18 |
 | 15 | Config in `config/pipeline.toml`; legacy v1 modules removed (recoverable from tag `v1.0.0`) | 12, 15 |
 
-## v2.1.0 — Intake-true forecasting (next)
-- Add `Intake`/`Intake-In-Year` to the SQL extract (`fetch_data.py`) and forecast
-  applications *by target intake*, replacing month-of-application periods.
-- Lead-time curves: share of an intake's applications received k months before start.
+## v2.1.0 — Full fair tournament, seasonality & staffing, statistical overlay, track record (in progress)
+Requested 2026-09-27. Every item keeps the v2 rule: identical origins, horizons, data and
+metric for every model; nothing fitted on data after a forecast origin.
 
-## v2.2.0 — Drivers & scenarios
-- Leading indicators as regressors (enquiries/leads, counsellor capacity, visa
-  approval rates) once history is clean; test uplift in the same rolling-origin harness.
+| # | Work item |
+|---|---|
+| 1 | All v1 models back in the tournament, re-implemented leak-free: LastYear_MoM, YoY_MoM (+seasonal prior), Rolling_MoM, AvgMonthly_MoM, Prophet, AutoARIMA, XGBoost (global direct), neural net (global direct MLP — TensorFlow is not installed, v1's LSTM already fell back to this), Croston. Plus suggested: STL+ETS, robust seasonal median |
+| 2 | Policy `mean_screened`: average of models that beat the benchmark on past data only — robust when weak models join the pool; compared walk-forward with the other policies |
+| 3 | Internal signals in the global ML models: Received→Submitted funnel lags, academic-calendar/intake-season flags |
+| 4 | Seasonality & staffing: STL seasonal index per organisation/country, High / Medium / Low months, year-by-year stability, 12-month staffing calendar with capacity (upper-range) figures |
+| 5 | Statistical overlay: recent level-shift (bias) correction estimated from realised errors with empirical-Bayes shrinkage; applied only if it improves walk-forward accuracy. Judgemental overlay stays optional and governed |
+| 6 | Track record: simulated history backfilled from backtests + live history; Forecast-vs-Actual by month and vintage; feeds item 5 |
+| 7 | Human signals: `Human_Inputs` template (expected volumes + reason) recorded every run and scored; combined statistically once ≥6 months of track record exist |
+| 8 | Reports: fully labelled charts (seasonality heatmap, H/M/L profile, forecast vs actual, model league table); human-friendly Excel (plain-English headers, native charts, staffing calendar, grouped tabs) |
+
+## v2.2.0 — Intake-true forecasting and external drivers
+- Add the intake field (e.g. `Intake-In-Year`) to the SQL extract and forecast by target intake;
+  lead-time curves (share of an intake's applications received k months before start).
+- Leading indicators as regressors (enquiries/leads, counsellor capacity, marketing, visa
+  approval rates); each must prove uplift in the rolling-origin harness before use.
 - Scenario engine: overlays as distributions rather than point multipliers.
 
-## v2.3.0 — Operations
+## v2.3.0 — Operations (renumbered from the original plan)
 - Scheduled monthly run after the 25th-cycle close; e-mail/Teams notification with the PDF brief.
 - Drift monitor: alert when realised 80% coverage leaves 70–90% or WAPE degrades.
 - Optional: statsforecast / hierarchicalforecast back-ends for speed at larger scale.
