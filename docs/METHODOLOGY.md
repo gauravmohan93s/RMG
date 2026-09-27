@@ -81,19 +81,39 @@ Default W = diagonal of one-step backtest error variances (WLS); `mint_shrink` u
 Schäfer-Strimmer shrunk covariance when every node has complete residuals. Negative
 bottom values are set to 0 and re-aggregated, so outputs are coherent and non-negative.
 
-## 7. Prediction intervals (`src/forecasting/intervals.py`)
-- **Monthly**: quantiles of relative (log1p) errors of the combined forecast from the
-  backtest, per series and horizon (window h±1; pooled by metric/level if < 8 errors),
-  forced to contain the point and to widen with horizon.
-- **Calibration (split-conformal / CQR)**: quantiles are re-fitted on errors realised before the
-  walk-forward window; on the walk-forward errors (never used for fitting) each tail receives an
-  additive log-scale offset so it is missed at most (1-L)/2 of the time, per metric × level ×
-  horizon band. Offsets only widen (never narrow) a tail. Coverage before/after is reported.
-- **3/6/12-month totals** (monthly quantiles are not additive): location-scale pooling —
-  each series' own monthly error scale × the pooled distribution of standardised block
-  errors of all series of the metric, then conformally calibrated in the same way. One series has
-  too few 12-month windows to estimate its own range; series differ in volatility, so raw pooling
-  is also wrong.
+## 7. Forecast ranges (`src/forecasting/ranges.py`, v2.2)
+Ranges are built from the past errors of the forecasts **as published** (regions summed bottom-up),
+r = log(1+actual) − log(1+forecast), for each month ahead (window h±1) and for next-3/6/12-month
+totals (from the totals' own errors, since monthly ranges do not add up).
+
+- **Two candidate constructions**
+  - *empirical*: recency-weighted quantiles of the series' own errors (half-life 6 origins), which
+    allows skew;
+  - *centred*: symmetric around the forecast, ± z × robust spread. The spread is the
+    recency-weighted median absolute deviation × 1.4826, shrunk toward the pooled spread of
+    comparable series (8 pseudo-observations).
+
+  Series with fewer than 8 own errors use the pool of the same metric and level (regions as
+  fallback).
+- **Chosen on evidence.** Both constructions are replayed at each of the last 12 origins, fitted only
+  on errors realised by then. They are scored with the **interval score** (Gneiting & Raftery 2007),
+  a proper scoring rule: width plus 2/α × distance of any miss. Per level group
+  (Organisation + Country / Region) and window, the lower mean score is used. On 2026-09 data,
+  *centred* won for every aggregate window; regions use *empirical* for short horizons and *centred*
+  for longer ones.
+- **Symmetric calibration.** If the chosen construction's test coverage is off target by more than 5
+  points (N ≥ 30), one width factor in [0.8, 1.5] scales both sides equally. A tail is never shifted
+  on its own.
+- **Why v2.1's method was replaced.** v2.1 widened each tail separately until it covered the last 12
+  walk-forward months. Those months were one regime (a surge the models under-forecast), so a past
+  bias became a permanent upside tail: the organisation quarter was −14% / +45% and one country
+  was 0 / +304%. Bias corrections of the point forecast were tested and did not win (§7a), and the
+  forecast errors changed sign between 2024–25 and 2025–26. Encoding that bias in the ranges would
+  contradict the evidence.
+- **What width means.** A range can only be as narrow as the forecast is accurate. The 50% range is
+  "most likely" and the 80% range is for planning. Narrower honest ranges require better point
+  accuracy, for example leading indicators (ROADMAP).
+- The earlier empirical/conformal functions remain in `intervals.py` for reference and tests.
 
 ## 7a. Statistical overlay (`src/forecasting/bias_correction.py`)
 The data-driven replacement for guessed policy multipliers. Recent bias of each series =
@@ -134,11 +154,20 @@ forecasts made 1–12 months earlier — from the walk-forward test (what the me
 at the time) plus every live forecast stored in `prediction_history_v2.parquet`.
 
 ## 10. Reporting labels
-- **Confidence**: High ≤ 15%, Medium ≤ 30%, Low > 30% walk-forward WAPE; emerging and
-  guardrail-scaled series are always Low. These are communication thresholds, not model inputs.
+- **Reliability** (`src/forecasting/reliability.py`) — measured the way the numbers are used: the typical
+  (median) absolute % error of the **next-3-month total** of the **published** (reconciled) forecast in the
+  walk-forward test. High ≤ 10%, Medium ≤ 10–20%, Low > 20%, New = fewer than 4 testable quarters,
+  Review = guardrail-capped. Reliability describes how predictable a market is; every series already uses
+  the most accurate method found, so "Low" never means a weaker method was used.
+  (v2.1 labelled single-month, unreconciled errors, which overstated uncertainty for decisions.)
+- **Ranges** are built from the errors of the published forecasts (with bottom-up reconciliation, the
+  regions' summed forecasts — not the aggregate's own model), then conformally calibrated (widen-only).
 - **YoY** always compares identical calendar months (like-for-like).
 - **Fiscal periods**: FY starts in April; outlook = realised actuals + forecast remainder;
   only complete quarters/years are shown.
+- **Staffing FTE**: computed per region with that region's applications-per-FTE rate
+  (`Settings.xlsx!Staffing_Productivity`, most specific row wins); country / organisation FTE = sum of
+  their regions' FTE (rates differ by country group and region).
 
 ## 11. Governance
 - `run_manifest.json`: pipeline version, git commit (and dirty flag), data SHA-256, row

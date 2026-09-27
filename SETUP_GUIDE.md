@@ -161,10 +161,11 @@ always kept; adjusted figures appear in separate `Adjusted` columns.
 |---|---|---|
 | `Human_Inputs` | Country, Region (blank = country total; Country "Organisation" = whole org), Metric, Month (YYYY-MM), Expected_Volume, Submitted_By, Reason, Submitted_On | Shown next to the model, recorded every run and scored against actuals; blended in only for people with ≥ 6 scored months who beat the model |
 | `Policy_Events` | Country, Metric (* = both), Event, Start_Month (YYYY-MM), Notes | The real impact of each event is measured against a counterfactual forecast, with a placebo significance test |
+| `Staffing_Productivity` | Country, Region (* = all regions of the country), Metric (* = both), Apps_Per_FTE_Month, Owner, Notes | FTE per region with its own rate; country and organisation FTE are the sums of their regions |
 
 Templates: `config/human_inputs_template.csv`, `config/policy_events_template.csv`.
-For staffing in FTE, set `seasonality.apps_per_fte_month` in `config/pipeline.toml`
-(e.g. 120 applications per counsellor per month).
+For staffing in FTE, fill `Staffing_Productivity` (productivity differs by country group and region;
+the config value `seasonality.apps_per_fte_month` is only a fallback for rows not listed).
 
 ## 7️⃣ Verify Setup
 

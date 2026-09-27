@@ -3,6 +3,45 @@
 All notable changes are recorded here. Format: [Keep a Changelog](https://keepachangelog.com/);
 versioning: [SemVer](https://semver.org/) as defined in `docs/ROADMAP.md`.
 
+## [2.2.0] — 2026-09-27
+
+Requested: ranges that support decisions, reliability that matches the published numbers, an
+executive-readable brief, and region-specific staffing productivity.
+
+### Changed
+- **Forecast ranges chosen on evidence** (`src/forecasting/ranges.py`): empirical vs centred
+  robust construction, chosen per level group and window by the interval score in a sequential
+  (origin-by-origin, leak-free) replay. Only a symmetric width factor (0.8–1.5) is applied, so
+  ranges no longer carry a past bias as a one-sided tail.
+
+  | Sequential test, 2026-09 data | before | after |
+  |---|---|---|
+  | Organisation receipts, next-quarter 80% range | −14% / +45% | about ±10% |
+  | Organisation receipts, 12-month 80% range | −21% / +15% | about ±17% |
+
+  Aggregate 80% coverage in the test was 80–87%.
+- **Reliability** is measured on next-3-month totals of the published (reconciled) forecast:
+  High ≤ 10%, Medium ≤ 20%, Low > 20% typical error; guardrail-capped series are marked Review.
+- **Staffing FTE per region**, using region- and country-specific applications per counsellor
+  (`Staffing_Productivity` sheet); country and organisation FTE are sums of their regions.
+- **Point estimate `auto`**: a smearing-corrected mean is used only if it improves quarter totals
+  across levels by ≥ 3% walk-forward. On 2026-09 data it did not (organisation better, countries
+  worse), so the median is used.
+- The executive brief was rewritten in plain language; the Excel workbook gains a Range Method
+  Test sheet.
+
+### Fixed
+- The published range always contains the point forecast (fixes a round-off at zero width).
+
+### Security
+- The database password was removed from all local git history. Credentials are read only from the
+  environment or `.env`.
+
+### Evidence
+- `docs/experiments/2026-09-27_training_window.md`: excluding 2020–21 COVID months was rejected.
+- A uniform organisation-level bias factor was tested offline and gave mixed results, so it was
+  not adopted.
+
 ## [2.1.0] — 2026-09-27
 
 Requested improvements: all original models in a fair tournament, statistically derived

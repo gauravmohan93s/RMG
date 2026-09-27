@@ -42,6 +42,7 @@ class DataCfg:
     inactive_months: int
     min_months_for_tournament: int
     fin_year_start_month: int
+    train_start: str = ""
 
 
 @dataclass(frozen=True)
@@ -104,6 +105,7 @@ class Settings:
     selection: SelectionCfg
     intervals: IntervalCfg
     reconciliation_method: str
+    point_estimate: str
     guardrails: GuardCfg
     overlay_sheet: str
     overlay_template: Path
@@ -131,6 +133,7 @@ def load_settings(raw: Optional[Dict[str, Any]] = None) -> Settings:
             inactive_months=int(r["data"]["inactive_months"]),
             min_months_for_tournament=int(r["data"]["min_months_for_tournament"]),
             fin_year_start_month=int(r["data"]["fin_year_start_month"]),
+            train_start=str(os.environ.get("RMG_TRAIN_START", r["data"].get("train_start", ""))),
         ),
         backtest=BacktestCfg(
             horizon=int(r["backtest"]["horizon"]),
@@ -155,6 +158,7 @@ def load_settings(raw: Optional[Dict[str, Any]] = None) -> Settings:
             max_offset=float(r["intervals"]["max_offset"]),
         ),
         reconciliation_method=str(r["reconciliation"]["method"]),
+        point_estimate=str(r.get("forecast", {}).get("point_estimate", "auto")),
         guardrails=GuardCfg(
             min_ratio=float(r["guardrails"]["min_ratio"]),
             max_ratio=float(r["guardrails"]["max_ratio"]),

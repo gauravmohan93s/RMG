@@ -90,6 +90,8 @@ def clean_raw(df: pd.DataFrame, drop_regions: tuple = ()) -> pd.DataFrame:
 def build_panel(raw: pd.DataFrame, cfg: DataCfg) -> Panel:
     if raw.empty:
         raise ValueError("Raw extract is empty after filtering")
+    if getattr(cfg, "train_start", ""):
+        raw = raw[raw["Date"] >= pd.Timestamp(cfg.train_start)]     # e.g. exclude COVID-era months
     months = pd.date_range(raw["Date"].min(), raw["Date"].max(), freq="MS")
     pos = {d: i for i, d in enumerate(months)}
     T = len(months)

@@ -80,24 +80,83 @@ def seasonal_indices(history: pd.DataFrame, high: float = 1.10, low: float = 0.9
     return pd.DataFrame(idx_rows), pd.DataFrame(year_rows)
 
 
+PRODUCTIVITY_COLS = ["Country", "Region", "Metric", "Apps_Per_FTE_Month", "Owner", "Notes"]
+
+
+def productivity_lookup(prod: Optional[pd.DataFrame], default: float = 0.0):
+    """
+    Returns f(country, region, metric) -> (apps per FTE-month, source). Most specific row wins:
+    exact region > country '*' > metric '*'; `default` (config) if nothing matches; NaN if unset.
+    """
+    table = {}
+    if prod is not None and len(prod):
+        p = prod.copy()
+        for c in ("Country", "Region", "Metric"):
+            p[c] = p[c].fillna("*").astype(str).str.strip().replace("", "*")
+        p["Apps_Per_FTE_Month"] = pd.to_numeric(p["Apps_Per_FTE_Month"], errors="coerce")
+        for r in p.dropna(subset=["Apps_Per_FTE_Month"]).itertuples():
+            if r.Apps_Per_FTE_Month > 0:
+                table[(r.Country, r.Region, r.Metric)] = float(r.Apps_Per_FTE_Month)
+
+    def f(country, region, metric):
+        for key, src in (((country, region, metric), "region"), ((country, region, "*"), "region"),
+                         ((country, "*", metric), "country"), ((country, "*", "*"), "country")):
+            if key in table:
+                return table[key], f"Staffing_Productivity ({src})"
+        if default and default > 0:
+            return float(default), "config default"
+        return np.nan, "not set"
+    return f
+
+
 def staffing_calendar(fc: pd.DataFrame, sidx: pd.DataFrame, high: float = 1.10, low: float = 0.90,
-                      apps_per_fte_month: Optional[float] = None,
-                      levels: Sequence[str] = ("Organisation", "Country")) -> pd.DataFrame:
-    """Next-12-month workload calendar per organisation/country and metric."""
+                      apps_per_fte_month: Optional[float] = None, productivity: Optional[pd.DataFrame] = None,
+                      levels: Sequence[str] = ("Organisation", "Country", "Region")) -> pd.DataFrame:
+    """
+    Next-12-month workload calendar per organisation / country / region and metric.
+    FTE is computed per REGION with that region's own productivity (Settings.xlsx sheet
+    Staffing_Productivity); country and organisation FTE are the sums of their regions' FTE,
+    because productivity differs by country group and region.
+    """
     hist_cls = sidx.set_index(["Level", "Country", "Region", "Metric", "Month"])["Class"] if len(sidx) else None
+    rate = productivity_lookup(productivity, apps_per_fte_month or 0.0)
     rows = []
     for key, g in fc[fc["Level"].isin(levels)].groupby(["Level", "Country", "Region", "Metric"], sort=False):
         g = g.sort_values("Date")
         avg = float(g["Forecast"].mean())
         for r in g.itertuples():
             load = r.Forecast / avg if avg > 0 else np.nan
-            row = {"Level": key[0], "Country": key[1], "Region": key[2], "Metric": key[3],
-                   "Label": getattr(r, "Label", key[1]), "Date": r.Date, "Month_Name": MONTH_NAMES[r.Date.month - 1],
-                   "Forecast": r.Forecast, "Low_80": r.Lo80, "Capacity_Plan_80": r.Hi80,
-                   "Load_Index": load, "Workload_Class": classify(load, high, low),
-                   "Historical_Class": (hist_cls.get((*key, r.Date.month), "") if hist_cls is not None else "")}
-            if apps_per_fte_month and apps_per_fte_month > 0:
-                row["FTE_Base"] = r.Forecast / apps_per_fte_month
-                row["FTE_Capacity_80"] = r.Hi80 / apps_per_fte_month
-            rows.append(row)
-    return pd.DataFrame(rows)
+            rows.append({"Level": key[0], "Country": key[1], "Region": key[2], "Metric": key[3],
+                         "Label": getattr(r, "Label", key[1]), "Date": r.Date,
+                         "Month_Name": MONTH_NAMES[r.Date.month - 1],
+                         "Forecast": r.Forecast, "Low_80": r.Lo80, "Capacity_Plan_80": r.Hi80,
+                         "Load_Index": load, "Workload_Class": classify(load, high, low),
+                         "Historical_Class": (hist_cls.get((*key, r.Date.month), "") if hist_cls is not None else "")})
+    st = pd.DataFrame(rows)
+    if st.empty:
+        return st
+    reg = st["Level"] == "Region"
+    rs = [rate(c, rg, m) for c, rg, m in zip(st.loc[reg, "Country"], st.loc[reg, "Region"], st.loc[reg, "Metric"])]
+    st["Apps_Per_FTE_Month"], st["Productivity_Source"] = np.nan, ""
+    st.loc[reg, "Apps_Per_FTE_Month"] = [x[0] for x in rs]
+    st.loc[reg, "Productivity_Source"] = [x[1] for x in rs]
+    st["FTE_Base"] = st["Forecast"] / st["Apps_Per_FTE_Month"]
+    st["FTE_Capacity_80"] = st["Capacity_Plan_80"] / st["Apps_Per_FTE_Month"]
+    if not st.loc[reg, "FTE_Base"].notna().any():
+        return st.drop(columns=["Apps_Per_FTE_Month", "Productivity_Source", "FTE_Base", "FTE_Capacity_80"])
+    r_ = st[reg]
+    by_c = r_.groupby(["Country", "Metric", "Date"]).agg(F=("FTE_Base", lambda x: x.sum(min_count=1)),
+                                                          Cov=("FTE_Base", lambda x: x.notna().mean()))
+    by_o = r_.groupby(["Metric", "Date"]).agg(F=("FTE_Base", lambda x: x.sum(min_count=1)),
+                                              Cov=("FTE_Base", lambda x: x.notna().mean()))
+    for lvl, tbl, keys in (("Country", by_c, ["Country", "Metric", "Date"]), ("Organisation", by_o, ["Metric", "Date"])):
+        m = st["Level"] == lvl
+        idx = pd.MultiIndex.from_frame(st.loc[m, keys])
+        f = tbl["F"].reindex(idx).to_numpy()
+        cov = tbl["Cov"].reindex(idx).to_numpy()
+        st.loc[m, "FTE_Base"] = f
+        # capacity FTE: aggregate capacity x the level's effective apps-per-FTE (from its regions)
+        st.loc[m, "FTE_Capacity_80"] = st.loc[m, "Capacity_Plan_80"].to_numpy() * f / st.loc[m, "Forecast"].to_numpy()
+        st.loc[m, "Productivity_Source"] = [f"sum of regions ({100 * c:.0f}% with a rate)" if np.isfinite(c) else ""
+                                            for c in cov]
+    return st

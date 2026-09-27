@@ -53,9 +53,10 @@ def _enforce(q: pd.DataFrame, levels: Sequence[int], by_h: bool = True) -> pd.Da
     for L in levels:
         q[f"q_lo{L}"] = np.minimum(q[f"q_lo{L}"], 0.0)
         q[f"q_hi{L}"] = np.maximum(q[f"q_hi{L}"], 0.0)
-    wide, narrow = max(levels), min(levels)
-    q[f"q_lo{wide}"] = np.minimum(q[f"q_lo{wide}"], q[f"q_lo{narrow}"])
-    q[f"q_hi{wide}"] = np.maximum(q[f"q_hi{wide}"], q[f"q_hi{narrow}"])
+    lv = sorted(levels)
+    for narrow, wide in zip(lv[:-1], lv[1:]):          # nest: 50% inside 80% inside 95%
+        q[f"q_lo{wide}"] = np.minimum(q[f"q_lo{wide}"], q[f"q_lo{narrow}"])
+        q[f"q_hi{wide}"] = np.maximum(q[f"q_hi{wide}"], q[f"q_hi{narrow}"])
     if by_h:
         q = q.sort_values(["node_id", "h"])
         for L in levels:
@@ -64,12 +65,30 @@ def _enforce(q: pd.DataFrame, levels: Sequence[int], by_h: bool = True) -> pd.Da
     return q
 
 
-def _quantiles(r: np.ndarray, levels: Sequence[int]) -> Dict[str, float]:
+RECENCY_HALF_LIFE = 6.0   # forecast origins; errors from 6 origins ago count half (errors are not stationary)
+
+
+def _wq(r: np.ndarray, w: np.ndarray, p: float) -> float:
+    """Weighted empirical quantile."""
+    o = np.argsort(r)
+    r, w = r[o], w[o]
+    c = (np.cumsum(w) - 0.5 * w) / w.sum()
+    return float(np.interp(p, c, r))
+
+
+def _quantiles(r: np.ndarray, levels: Sequence[int], w: Optional[np.ndarray] = None) -> Dict[str, float]:
     out = {}
     for L in levels:
         lo, hi = _alphas(L)
-        out[f"q_lo{L}"], out[f"q_hi{L}"] = float(np.quantile(r, lo)), float(np.quantile(r, hi))
+        if w is None:
+            out[f"q_lo{L}"], out[f"q_hi{L}"] = float(np.quantile(r, lo)), float(np.quantile(r, hi))
+        else:
+            out[f"q_lo{L}"], out[f"q_hi{L}"] = _wq(r, w, lo), _wq(r, w, hi)
     return out
+
+
+def _recency(o: np.ndarray) -> np.ndarray:
+    return 0.5 ** ((o.max() - o) / RECENCY_HALF_LIFE)
 
 
 def _conformal_offsets(q_lo: np.ndarray, q_hi: np.ndarray, r: np.ndarray, level: int,
@@ -85,11 +104,31 @@ def _conformal_offsets(q_lo: np.ndarray, q_hi: np.ndarray, r: np.ndarray, level:
     return float(np.clip(d_lo, 0.0, cap)), float(np.clip(d_hi, 0.0, cap))
 
 
+NARROW_FLOOR = 0.6        # a range is never narrowed below 60% of its fitted width
+NARROW_MIN_N = 30         # walk-forward errors needed before any narrowing
+NARROW_TRIGGER_PP = 5.0   # narrow only if coverage exceeds the target by more than 5 points
+
+
+def _narrowing_factor(lo: np.ndarray, hi: np.ndarray, r: np.ndarray, level: int) -> float:
+    """
+    Common scale c in [NARROW_FLOOR, 1] for both tails when an interval clearly over-covers in the
+    walk-forward test (wider than the evidence supports): the smallest c that still reaches the
+    target. Scaling both tails together keeps the fitted asymmetry, so no tail collapses onto the point.
+    """
+    cov = lambda c: float(np.mean((r >= c * lo) & (r <= c * hi)))
+    if len(r) < NARROW_MIN_N or 100 * cov(1.0) <= level + NARROW_TRIGGER_PP:
+        return 1.0
+    for c in np.round(np.arange(NARROW_FLOOR, 1.0 + 1e-9, 0.02), 2):
+        if cov(c) >= level / 100:
+            return float(c)
+    return 1.0
+
+
 def residual_quantiles(comb: pd.DataFrame, nodes: pd.DataFrame, levels: Sequence[int],
                        min_obs: int, horizon: int):
     """comb: node_id, h, Pred, Actual (combined backtest). Returns (quantiles, pooled dict)."""
     meta = nodes.set_index("node_id")[["Metric", "Level"]]
-    d = comb.join(meta, on="node_id", how="inner")
+    d = comb.merge(meta.reset_index(), on="node_id", how="inner")
     d["r"] = np.log1p(d["Actual"].clip(lower=0)) - np.log1p(d["Pred"].clip(lower=0))
     pooled = {}
     for (metric, level), g in d.groupby(["Metric", "Level"]):
@@ -101,9 +140,12 @@ def residual_quantiles(comb: pd.DataFrame, nodes: pd.DataFrame, levels: Sequence
     for nid, g in d.groupby("node_id"):
         metric, level = meta.loc[nid, "Metric"], meta.loc[nid, "Level"]
         for h in range(1, horizon + 1):
-            r = g.loc[g["h"].between(h - 1, h + 1), "r"].to_numpy()
+            sub = g[g["h"].between(h - 1, h + 1)]
+            r = sub["r"].to_numpy()
             if len(r) >= min_obs:
-                rows.append({"node_id": nid, "h": h, "Source": "node", "N": len(r), **_quantiles(r, levels)})
+                w = _recency(sub["o"].to_numpy()) if "o" in sub.columns else None
+                rows.append({"node_id": nid, "h": h, "Source": "node (recency-weighted)", "N": len(r),
+                             **_quantiles(r, levels, w)})
             else:
                 q, n = pooled_quantiles(pooled, metric, level, h)
                 rows.append({"node_id": nid, "h": h, "Source": "pooled", "N": n, **q})
@@ -147,18 +189,20 @@ def calibrate(q: pd.DataFrame, honest: pd.DataFrame, nodes: pd.DataFrame, levels
                 continue
             for L in levels:
                 lo, hi, r = g[f"q_lo{L}"].to_numpy(), g[f"q_hi{L}"].to_numpy(), g["r"].to_numpy()
-                d_lo, d_hi = _conformal_offsets(lo, hi, r, L, max_offset) if enabled else (0.0, 0.0)
-                cov = lambda a, b: float(np.mean((r >= np.minimum(lo - a, 0)) & (r <= np.maximum(hi + b, 0))))
+                c = _narrowing_factor(lo, hi, r, L) if enabled else 1.0
+                d_lo, d_hi = _conformal_offsets(c * lo, c * hi, r, L, max_offset) if enabled else (0.0, 0.0)
+                cov = lambda cc, a, b: float(np.mean((r >= np.minimum(cc * lo - a, 0))
+                                                     & (r <= np.maximum(cc * hi + b, 0))))
                 rows.append({"Metric": metric, "Level": level, "Months_Ahead": band, "Calibrated_On": scope,
-                             "Interval": f"{L}%", "Offset_Lo": d_lo, "Offset_Hi": d_hi,
-                             "Coverage_Before_Pct": 100 * cov(0.0, 0.0),
-                             "Coverage_After_Pct": 100 * cov(d_lo, d_hi), "Target_Pct": L, "N": len(r)})
+                             "Interval": f"{L}%", "Narrowing_Factor": c, "Offset_Lo": d_lo, "Offset_Hi": d_hi,
+                             "Coverage_Before_Pct": 100 * cov(1.0, 0.0, 0.0),
+                             "Coverage_After_Pct": 100 * cov(c, d_lo, d_hi), "Target_Pct": L, "N": len(r)})
     calib = pd.DataFrame(rows)
     for _, row in calib.iterrows():
         L = int(row["Interval"].rstrip("%"))
         m = (q["Metric"] == row["Metric"]) & (q["Level"] == row["Level"]) & (q["Band"] == row["Months_Ahead"])
-        q.loc[m, f"q_lo{L}"] = q.loc[m, f"q_lo{L}"] - row["Offset_Lo"]
-        q.loc[m, f"q_hi{L}"] = q.loc[m, f"q_hi{L}"] + row["Offset_Hi"]
+        q.loc[m, f"q_lo{L}"] = row["Narrowing_Factor"] * q.loc[m, f"q_lo{L}"] - row["Offset_Lo"]
+        q.loc[m, f"q_hi{L}"] = row["Narrowing_Factor"] * q.loc[m, f"q_hi{L}"] + row["Offset_Hi"]
     q = _enforce(q.drop(columns=["Metric", "Level", "Band"]), levels)
     return q, calib
 
@@ -190,106 +234,194 @@ def block_quantiles(comb: pd.DataFrame, nodes: pd.DataFrame, levels: Sequence[in
                     honest: Optional[pd.DataFrame] = None, max_offset: float = 1.5,
                     comb_fit: Optional[pd.DataFrame] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Ranges for the next-k-month total (k = 3, 6, 12) by location-scale pooling:
-        scale_i,k = std of series i's monthly log errors at horizons <= k
-        z         = block log error / scale_i,k, pooled over all series of the metric
-        range_i   = (Q(z) + conformal offset) x scale_i,k
-    The conformal offset (in z units) comes from walk-forward block errors, measured against
-    z-quantiles fitted on `comb_fit` (errors realised before the walk-forward window).
-    Series without residuals (emerging) use the median scale of their level.
+    Ranges for the next-k-month total (k = 3, 6, 12), from evidence about totals themselves:
+      1. Own errors: recency-weighted empirical quantiles of the series' OWN k-month-total log errors
+         (published forecasts, rolling-origin backtest) when it has >= min_obs windows. Recent errors
+         weigh more (half-life RECENCY_HALF_LIFE origins): a market's 2024 collapse should not set the
+         width of its 2027 range forever, but it still counts.
+      2. Otherwise: pooled quantiles of comparable series (same metric and level; regions as fallback).
+      3. Calibration on the walk-forward totals, per metric x group (aggregates = organisation +
+         countries; regions): bounded narrowing if clearly too wide, then widen-only offsets so each
+         tail is missed no more than its target — measured with quantiles fitted before the window.
+    Returns (quantiles per node x k, calibration table).
     """
-    from statistics import NormalDist
-
     meta = nodes.set_index("node_id")[["Metric", "Level"]]
+    group_of = {"Organisation": "Aggregate", "Country": "Aggregate", "Region": "Region"}
 
-    def scales(frame):
-        m = frame.copy()
-        m["r"] = np.log1p(m["Actual"].clip(lower=0)) - np.log1p(m["Pred"].clip(lower=0))
-        out = {}
+    def fit(frame):
+        own, pooled = {}, {}
+        if frame is None or frame.empty:
+            return own, pooled
         for k in BLOCKS:
-            s = m[m["h"] <= k].groupby("node_id")["r"].agg(["std", "size"])
-            for nid, row in s.iterrows():
-                if row["size"] >= min_obs and np.isfinite(row["std"]) and row["std"] > 0:
-                    out[(nid, k)] = float(row["std"])
-        return out
+            s = _block_errors(frame, "Pred", k).merge(meta.reset_index(), on="node_id", how="inner")
+            for nid, g in s.groupby("node_id"):
+                if len(g) >= min_obs:
+                    own[(nid, k)] = (_quantiles(g["rb"].to_numpy(), levels, _recency(g["o"].to_numpy())), len(g))
+            for (m, lvl), g in s.groupby(["Metric", "Level"]):
+                if len(g) >= min_obs:
+                    pooled[(m, lvl, k)] = (_quantiles(g["rb"].to_numpy(), levels), len(g))
+            for m, g in s.groupby("Metric"):
+                if len(g) >= 3:
+                    pooled[(m, "*", k)] = (_quantiles(g["rb"].to_numpy(), levels), len(g))
+        return own, pooled
 
-    def zquant(frame, sc):
-        zs = []
-        for k in BLOCKS:
-            s = _block_errors(frame, "Pred", k)
-            s["sc"] = [sc.get((n, k), np.nan) for n in s["node_id"]]
-            zs.append(s.dropna(subset=["sc"]))
-        z = pd.concat(zs, ignore_index=True).join(meta, on="node_id")
-        z["z"] = z["rb"] / z["sc"]
-        return {key: (_quantiles(g["z"].to_numpy(), levels), len(g))
-                for key, g in z.groupby(["Metric", "k"]) if len(g) >= min_obs}
+    def base_q(own, pooled, nid, k):
+        m, lvl = meta.loc[nid, "Metric"], meta.loc[nid, "Level"]
+        if (nid, k) in own:
+            return own[(nid, k)][0], own[(nid, k)][1], "own totals (recency-weighted)"
+        for key, src in (((m, lvl, k), f"pooled {lvl}"), ((m, "Region", k), "pooled Region"),
+                         ((m, "*", k), "pooled all series")):
+            if key in pooled:
+                return pooled[key][0], pooled[key][1], src
+        for kk in sorted((b for b in BLOCKS if b < k), reverse=True):     # last resort: shorter window
+            if (nid, kk) in own:
+                return own[(nid, kk)][0], own[(nid, kk)][1], f"own {kk}-month totals (fallback)"
+        return None, 0, ""
 
-    scale = scales(comb)
-    zq = zquant(comb, scale)
+    own, pooled = fit(comb)
+    own_f, pooled_f = fit(comb_fit) if comb_fit is not None and len(comb_fit) else (own, pooled)
 
-    # conformal offsets in z units from walk-forward block errors
-    offsets, calib_rows = {}, []
+    # sequential calibration on walk-forward totals (the same recency-weighted procedure, re-fitted
+    # at every test origin with only the errors realised by then)
+    adj, calib_rows = {}, pd.DataFrame()
     if honest is not None and not honest.empty:
-        zq_fit = zquant(comb_fit, scales(comb_fit)) if comb_fit is not None and len(comb_fit) else zq
+        errs, evals = [], []
         hz = honest.rename(columns={"Policy": "Pred"})
         for k in BLOCKS:
-            s = _block_errors(hz, "Pred", k).join(meta, on="node_id")
-            s["sc"] = [scale.get((n, k), np.nan) for n in s["node_id"]]
-            s = s.dropna(subset=["sc"])
-            for metric, g in s.groupby("Metric"):
-                if (metric, k) not in zq_fit or len(g) < 10:
-                    continue
-                zz = g["rb"].to_numpy() / g["sc"].to_numpy()
-                base = zq_fit[(metric, k)][0]
-                for L in levels:
-                    lo = np.full(len(zz), base[f"q_lo{L}"])
-                    hi = np.full(len(zz), base[f"q_hi{L}"])
-                    d_lo, d_hi = _conformal_offsets(lo, hi, zz, L, max_offset * 4)
-                    offsets[(metric, k, L)] = (d_lo, d_hi)
-                    cov = lambda a, b: float(np.mean((zz >= lo - a) & (zz <= hi + b)))
-                    calib_rows.append({"Metric": metric, "Window": f"Next {k} months", "Interval": f"{L}%",
-                                       "Offset_Lo_z": d_lo, "Offset_Hi_z": d_hi,
-                                       "Coverage_Before_Pct": 100 * cov(0, 0),
-                                       "Coverage_After_Pct": 100 * cov(d_lo, d_hi), "N": len(zz)})
-
-    med_scale: Dict[tuple, list] = {}
-    for (nid, k), v in scale.items():
-        med_scale.setdefault((meta.loc[nid, "Metric"], meta.loc[nid, "Level"], k), []).append(v)
-    med_scale = {key: float(np.median(v)) for key, v in med_scale.items()}
+            bb = _block_errors(comb, "Pred", k)
+            errs.append(pd.DataFrame({"node_id": bb["node_id"], "key": k, "o": bb["o"], "t": bb["o"] + k, "r": bb["rb"]}))
+            vv = _block_errors(hz, "Pred", k)
+            evals.append(pd.DataFrame({"node_id": vv["node_id"], "key": k, "e": vv["o"], "r": vv["rb"]}))
+        adj, calib_rows = sequential_calibration(pd.concat(errs, ignore_index=True), pd.concat(evals, ignore_index=True),
+                                                 nodes, levels, min_obs, max_offset, window=0,
+                                                 band_of=lambda k: f"{k}m", group_of=lambda l: group_of[l])
+        if len(calib_rows):
+            calib_rows = calib_rows.rename(columns={"Band": "Window"})
+            calib_rows["Window"] = calib_rows["Window"].str.replace("m", "", regex=False).map(lambda x: f"Next {x} months")
 
     rows = []
+    lv = sorted(levels)
     for nid in nodes["node_id"]:
-        metric, level = meta.loc[nid, "Metric"], meta.loc[nid, "Level"]
+        m, lvl = meta.loc[nid, "Metric"], meta.loc[nid, "Level"]
         for k in BLOCKS:
-            sc = scale.get((nid, k))
-            src = "own scale"
-            if sc is None:
-                sc = med_scale.get((metric, level, k)) or med_scale.get((metric, "Region", k))
-                src = "median scale of level"
-            if sc is None:
+            q0, n, src = base_q(own, pooled, nid, k)
+            if q0 is None:
                 continue
-            if (metric, k) in zq:
-                zz, n = zq[(metric, k)]
-                src += f" x pooled z ({metric})"
-            else:
-                zz, n = {}, 0
-                for L in levels:
-                    zval = NormalDist().inv_cdf(1 - (1 - L / 100) / 2)
-                    zz[f"q_lo{L}"], zz[f"q_hi{L}"] = -zval, zval
-                src += " x normal (too few blocks)"
             q = {}
             for L in levels:
-                d_lo, d_hi = offsets.get((metric, k, L), (0.0, 0.0))
-                q[f"q_lo{L}"] = min((zz[f"q_lo{L}"] - d_lo) * sc, 0.0)
-                q[f"q_hi{L}"] = max((zz[f"q_hi{L}"] + d_hi) * sc, 0.0)
-            wide, narrow = max(levels), min(levels)
-            q[f"q_lo{wide}"] = min(q[f"q_lo{wide}"], q[f"q_lo{narrow}"])
-            q[f"q_hi{wide}"] = max(q[f"q_hi{wide}"], q[f"q_hi{narrow}"])
-            rows.append({"node_id": nid, "k": k, "Source": src + (" + conformal" if offsets else ""),
-                         "N": n, **q})
-    return pd.DataFrame(rows), pd.DataFrame(calib_rows)
+                c, d_lo, d_hi = adj.get((m, group_of[lvl], f"{k}m", L), (1.0, 0.0, 0.0))
+                q[f"q_lo{L}"] = min(c * q0[f"q_lo{L}"] - d_lo, 0.0)
+                q[f"q_hi{L}"] = max(c * q0[f"q_hi{L}"] + d_hi, 0.0)
+            for narrow, wide in zip(lv[:-1], lv[1:]):
+                q[f"q_lo{wide}"] = min(q[f"q_lo{wide}"], q[f"q_lo{narrow}"])
+                q[f"q_hi{wide}"] = max(q[f"q_hi{wide}"], q[f"q_hi{narrow}"])
+            rows.append({"node_id": nid, "k": k, "Source": src + (" + calibrated" if adj else ""), "N": n, **q})
+    return pd.DataFrame(rows), calib_rows
 
 
 def apply_interval(point: np.ndarray, q_lo: np.ndarray, q_hi: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    lp = np.log1p(np.clip(point, 0, None))
-    return np.expm1(lp + q_lo), np.expm1(lp + q_hi)
+    p = np.clip(point, 0, None)
+    lp = np.log1p(p)
+    # min/max guard against round-off in expm1(log1p(x)) when an offset is exactly 0
+    return np.minimum(np.expm1(lp + q_lo), p), np.maximum(np.expm1(lp + q_hi), p)
+
+
+# ───────────────── sequential calibration (tests the procedure that is actually used) ─────────────────
+def _seq_fit(err: dict, pooled_err: dict, nid: str, pool_key: tuple, key: int, at: int, levels, min_obs: int,
+             window: int):
+    """Recency-weighted quantiles from errors realised by `at` (t <= at) for key±window; pooled fallback."""
+    for arr in (err.get(nid), pooled_err.get(pool_key)):
+        if arr is None:
+            continue
+        k_, t_, o_, r_ = arr
+        m = (np.abs(k_ - key) <= window) & (t_ <= at)
+        if m.sum() >= min_obs:
+            o = o_[m]
+            w = 0.5 ** ((at - o) / RECENCY_HALF_LIFE)
+            return _quantiles(r_[m], levels, w)
+    return None
+
+
+def sequential_calibration(err: pd.DataFrame, eval_: pd.DataFrame, nodes: pd.DataFrame, levels: Sequence[int],
+                           min_obs: int, max_offset: float, window: int, band_of=None,
+                           group_of=None) -> Tuple[dict, pd.DataFrame]:
+    """
+    err:   backtest errors of the PUBLISHED forecasts: node_id, key (h or k), o, t, r (log error)
+    eval_: walk-forward errors: node_id, key, e (origin), r
+    For every walk-forward error, the range procedure (recency-weighted own quantiles, pooled fallback)
+    is re-fitted with only errors realised by e; its misses give a bounded narrowing factor and
+    widen-only offsets per metric x group x band. Returns ({(metric, group, band, L): (c, d_lo, d_hi)}, table).
+    """
+    band_of = band_of or (lambda k: "all")
+    group_of = group_of or (lambda lvl: lvl)
+    meta = nodes.set_index("node_id")[["Metric", "Level"]]
+    e2 = err.merge(meta.reset_index(), on="node_id", how="inner")
+    by_node = {n: (g["key"].to_numpy(), g["t"].to_numpy(), g["o"].to_numpy(), g["r"].to_numpy())
+               for n, g in e2.groupby("node_id")}
+    by_pool = {(m, l): (g["key"].to_numpy(), g["t"].to_numpy(), g["o"].to_numpy(), g["r"].to_numpy())
+               for (m, l), g in e2.groupby(["Metric", "Level"])}
+    ev = eval_.merge(meta.reset_index(), on="node_id", how="inner")
+    recs = []
+    for row in ev.itertuples(index=False):
+        q = _seq_fit(by_node, by_pool, row.node_id, (row.Metric, row.Level), row.key, row.e, levels, min_obs, window)
+        if q is None:
+            continue
+        recs.append({"Metric": row.Metric, "Group": group_of(row.Level), "Band": band_of(row.key), "r": row.r, **q})
+    adj, rows = {}, []
+    if not recs:
+        return adj, pd.DataFrame()
+    d = pd.DataFrame(recs)
+    for (m, grp, band), g in d.groupby(["Metric", "Group", "Band"]):
+        if len(g) < 10:
+            continue
+        r = g["r"].to_numpy()
+        for L in levels:
+            lo, hi = g[f"q_lo{L}"].to_numpy(), g[f"q_hi{L}"].to_numpy()
+            c = _narrowing_factor(lo, hi, r, L)
+            d_lo, d_hi = _conformal_offsets(c * lo, c * hi, r, L, max_offset)
+            adj[(m, grp, band, L)] = (c, d_lo, d_hi)
+            cov = lambda cc, a, b: float(np.mean((r >= np.minimum(cc * lo - a, 0)) & (r <= np.maximum(cc * hi + b, 0))))
+            rows.append({"Metric": m, "Group": grp, "Band": band, "Interval": f"{L}%", "Narrowing_Factor": c,
+                         "Offset_Lo": d_lo, "Offset_Hi": d_hi, "Coverage_Before_Pct": 100 * cov(1.0, 0, 0),
+                         "Coverage_After_Pct": 100 * cov(c, d_lo, d_hi), "Target_Pct": L, "N": len(r)})
+    return adj, pd.DataFrame(rows)
+
+
+
+def group_of_level(level: str) -> str:
+    return "Aggregate" if level in ("Organisation", "Country") else "Region"
+
+
+def monthly_calibration(q: pd.DataFrame, comb_pub: pd.DataFrame, honest: pd.DataFrame, nodes: pd.DataFrame,
+                        levels: Sequence[int], min_obs: int, max_offset: float, enabled: bool = True):
+    """Sequentially calibrated monthly ranges: returns (q adjusted, adjustments dict, table)."""
+    if not enabled or honest is None or honest.empty:
+        return q, {}, pd.DataFrame()
+    lr = lambda a, p: np.log1p(a.clip(lower=0)) - np.log1p(p.clip(lower=0))
+    err = pd.DataFrame({"node_id": comb_pub["node_id"], "key": comb_pub["h"], "o": comb_pub["o"], "t": comb_pub["t"],
+                        "r": lr(comb_pub["Actual"], comb_pub["Pred"])})
+    ev = pd.DataFrame({"node_id": honest["node_id"], "key": honest["h"], "e": honest["o"],
+                       "r": lr(honest["Actual"], honest["Policy"])})
+    adj, tab = sequential_calibration(err, ev, nodes, levels, min_obs, max_offset, window=1, band_of=_band,
+                                      group_of=group_of_level)
+    q = apply_adjustments(q, adj, nodes, levels)
+    if len(tab):
+        tab = tab.rename(columns={"Band": "Months_Ahead"})
+    return q, adj, tab
+
+
+def adjustment_for(adj: dict, metric: str, level: str, h: int, L: int):
+    return adj.get((metric, group_of_level(level), _band(h), L)) or adj.get((metric, "Region", _band(h), L))         or (1.0, 0.0, 0.0)
+
+
+def apply_adjustments(q: pd.DataFrame, adj: dict, nodes: pd.DataFrame, levels: Sequence[int]) -> pd.DataFrame:
+    if not adj:
+        return q
+    meta = nodes.set_index("node_id")[["Metric", "Level"]]
+    q = q.copy()
+    for L in levels:
+        f = [adjustment_for(adj, meta.loc[n, "Metric"], meta.loc[n, "Level"], h, L) for n, h in zip(q["node_id"], q["h"])]
+        c = np.array([x[0] for x in f]); dl = np.array([x[1] for x in f]); dh = np.array([x[2] for x in f])
+        q[f"q_lo{L}"] = c * q[f"q_lo{L}"].to_numpy() - dl
+        q[f"q_hi{L}"] = c * q[f"q_hi{L}"].to_numpy() + dh
+    return _enforce(q, levels)

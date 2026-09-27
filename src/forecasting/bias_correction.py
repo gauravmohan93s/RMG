@@ -87,3 +87,60 @@ def decide(test: pd.DataFrame, min_gain_pct: float = 1.0) -> str:
     base = float(test.loc[test["Mode"] == "none", "WAPE_Pct"].iloc[0])
     best = test[test["Mode"] != "none"].sort_values("WAPE_Pct").iloc[0]
     return best["Mode"] if (base - best["WAPE_Pct"]) / base * 100 >= min_gain_pct else "none"
+
+
+# ───────────────── retransformation (mean vs median) correction ─────────────────
+# Models on the log scale forecast the typical (median) month. For skewed counts the median is
+# below the mean, and SUMS of regional medians under-state totals. Duan's smearing estimator
+# rescales each series by mean(exp(residual)) so forecasts become expected values, which add up.
+# It helps totals but can hurt single series (their absolute error is minimised by the median),
+# so it is adopted only if it improves decision-level (quarter-total) accuracy across levels.
+SMEAR_CAP = (0.8, 1.25)
+SMEAR_MIN_OBS = 8
+
+
+def smearing_factors(comb: pd.DataFrame, at: int) -> pd.Series:
+    d = comb[comb["t"] <= at]
+    r = np.log1p(d["Actual"].clip(lower=0)) - np.log1p(d["Pred"].clip(lower=0))
+    g = pd.DataFrame({"node_id": d["node_id"], "e": np.exp(r)}).groupby("node_id")["e"]
+    f = g.mean().where(g.size() >= SMEAR_MIN_OBS, 1.0)
+    return f.clip(*SMEAR_CAP)
+
+
+def _quarter_errors(h: pd.DataFrame, nodes: pd.DataFrame) -> pd.DataFrame:
+    """Median abs % error of next-3-month totals at region level and for bottom-up country/org sums."""
+    reg = nodes[nodes["Level"] == "Region"][["node_id", "Country", "Metric"]]
+    x = h.merge(reg, on="node_id")
+    out = []
+    for lvl, key in (("Region", "node_id"), ("Country", "Country"), ("Organisation", None)):
+        y = x.assign(key=x[key] if key else "org").groupby(["Metric", "key", "o", "h"])[["Policy", "Actual"]].sum()
+        y = y.reset_index()
+        q = y[y["h"] <= 3]
+        q = q[q.groupby(["Metric", "key", "o"])["h"].transform("nunique") == 3]
+        b = q.groupby(["Metric", "key", "o"])[["Policy", "Actual"]].sum()
+        b["APE"] = 100 * (b["Policy"] - b["Actual"]).abs() / b["Actual"].replace(0, np.nan)
+        for m, v in b.groupby(level="Metric")["APE"].median().items():
+            out.append({"Level": lvl, "Metric": m, "Quarter_Error_Pct": float(v)})
+    return pd.DataFrame(out)
+
+
+def smearing_test(comb: pd.DataFrame, honest: pd.DataFrame, nodes: pd.DataFrame):
+    """Walk-forward: factors at each origin e use only targets <= e. Returns (table, smeared honest Policy)."""
+    if honest is None or honest.empty:
+        return pd.DataFrame(), None
+    sm = honest["Policy"].to_numpy().copy()
+    for e, idx in honest.groupby("o").groups.items():
+        f = smearing_factors(comb, e)
+        pos = honest.index.get_indexer(idx)
+        sm[pos] = honest.loc[idx, "Policy"].to_numpy() * honest.loc[idx, "node_id"].map(f).fillna(1.0).to_numpy()
+    base = _quarter_errors(honest, nodes).assign(Mode="median (typical month)")
+    alt = _quarter_errors(honest.assign(Policy=sm), nodes).assign(Mode="mean (smearing-corrected)")
+    return pd.concat([base, alt], ignore_index=True), pd.Series(sm, index=honest.index)
+
+
+def decide_smearing(test: pd.DataFrame, min_gain_pct: float = 3.0) -> bool:
+    if test is None or test.empty:
+        return False
+    avg = test.groupby("Mode")["Quarter_Error_Pct"].mean()
+    b, a = avg.get("median (typical month)", np.nan), avg.get("mean (smearing-corrected)", np.nan)
+    return bool(np.isfinite(a) and np.isfinite(b) and b > 0 and (b - a) / b * 100 >= min_gain_pct)

@@ -13,7 +13,7 @@ from .. import __version__
 from ..data.prepare import ORG, TOTAL
 from . import insights as ins
 
-CONF_COLORS = {"High": "#d7f0dd", "Medium": "#fff1c7", "Low": "#fbd9d6"}
+CONF_COLORS = {"High": "#d7f0dd", "Medium": "#fff1c7", "Low": "#fbd9d6", "New": "#eceff3", "Review": "#fde2c8"}
 CLASS_FILL = {"High": "#cfe1f7", "Medium": "#f3f6fa", "Low": "#fdf1e3"}
 TAB_COLORS = {"plan": "#2a78d6", "analysis": "#1baf7a", "evidence": "#8a8a85"}
 SHEET_GROUP = {
@@ -25,7 +25,8 @@ SHEET_GROUP = {
 # plain-English column headers (the CSV files keep the technical names)
 FRIENDLY = {
     "Label": "Series", "Date": "Month", "Horizon": "Months ahead", "Forecast": "Forecast",
-    "Lo80": "Low (80% range)", "Hi80": "High (80% range)", "Lo95": "Low (95% range)", "Hi95": "High (95% range)",
+    "Lo50": "Most likely low (50%)", "Hi50": "Most likely high (50%)",
+    "Lo80": "Plan low (80% range)", "Hi80": "Plan high (80% range)", "Lo95": "Low (95% range)", "Hi95": "High (95% range)",
     "Forecast_Adjusted": "Adjusted forecast", "Adjusted_Lo80": "Adjusted low (80%)", "Adjusted_Hi80": "Adjusted high (80%)",
     "Overlay_Multiplier": "Business adjustment (x)", "Base_Forecast": "Before reconciliation",
     "Same_Months_Last_Year": "Same months last year", "YoY_Pct": "vs last year (%)", "Window": "Period",
@@ -45,7 +46,9 @@ FRIENDLY = {
     "Consistency_Pct": "Same class in % of years", "Month_Name": "Month", "Load_Index": "vs average month (x)",
     "Workload_Class": "Workload", "Historical_Class": "Usual for this month", "Capacity_Plan_80": "Plan for (80% high)",
     "Low_80": "Low (80%)", "FTE_Base": "FTE (forecast)", "FTE_Capacity_80": "FTE (80% high)",
-    "Target_Month": "Month", "Made_At": "Forecast made at", "Months_Ahead": "Months ahead",
+    "Target_Month": "Month", "Reliability": "Reliability",
+    "Typical_Quarter_Error_Pct": "Typical quarter error (±%)", "Apps_Per_FTE_Month": "Applications per FTE per month",
+    "Productivity_Source": "Productivity source", "Made_At": "Forecast made at", "Months_Ahead": "Months ahead",
     "Error_Pct": "Error (%)", "Human_Expected": "Manager expectation", "Human_vs_Model_Pct": "Manager vs model (%)",
     "Forecast_Human_Blend": "Blended (proven managers only)", "Human_Submitted_By": "Submitted by",
     "Human_Reason": "Manager reason", "Measured_Impact_Pct": "Measured impact (%)",
@@ -146,16 +149,19 @@ def write_workbook(res, path: Path) -> Path:
                             "not assumed. Use the 80% range for planning, the 95% range for stress tests."),
         ("Adjusted", "Baseline × approved policy/business adjustments (Policy Overlay sheet). "
                      "Equal to the baseline when no adjustment is approved."),
-        ("Confidence", "High ≤15%, Medium ≤30%, Low >30% average monthly error in the walk-forward test; "
+        ("Reliability", "How precisely a series can be forecast, measured on past quarters: High = quarter totals "
+                        "typically within ±10%, Medium ±10–20%, Low beyond ±20% (usually small or volatile markets), "
+                        "New = too little history. Every series uses the most accurate method found; reliability is "
+                        "about the market, not a weaker method. "
                        "new series and guardrail-capped series are always Low."),
-        ("How models were chosen", "Seven candidate methods were each tested on 24 past forecast origins over the full "
+        ("How models were chosen", "Seventeen candidate methods were each tested on 24 past forecast origins over the full "
                                    "12 months ahead. Ways of combining them were replayed walk-forward (Policy Comparison "
                                    "sheet); the equal-weight average of all methods won and is used. A series falls back to "
                                    "'same month last year' if the average did not beat it (Model Evidence sheet)."),
         ("Sheets", "Executive Summary · Country Outlook · Monthly Forecast · Fiscal Periods (for planning) — "
                    "Staffing Calendar · Seasonality · Forecast vs Actual · Statistical Overlay · Human Inputs · "
                    "Policy Events · Intake Profile (analysis) — Model Evidence · Model Scores · Accuracy by Horizon · Policy Comparison · "
-                   "Interval Calibration · Model Catalogue · "
+                   "Range Method Test · Interval Calibration · Model Catalogue · "
                    "Guardrails · Policy Overlay · Data Quality · Track Record · Run Manifest (for audit)."),
         ("Reproducibility", "Run Manifest records the code version (git commit), the data file fingerprint (SHA-256) "
                             "and every setting; the same inputs reproduce the same numbers."),
@@ -217,10 +223,10 @@ def write_workbook(res, path: Path) -> Path:
     fc = res.forecast
     mcols = ["Label", "Level", "Country", "Region", "Metric", "Date", "Horizon", "Forecast", "Lo80", "Hi80",
              "Lo95", "Hi95", "Forecast_Adjusted", "Adjusted_Lo80", "Adjusted_Hi80", "Overlay_Multiplier",
-             "Confidence", "Method", "Models", "Base_Forecast"]
+             "Reliability", "Typical_Quarter_Error_Pct", "Method", "Models", "Base_Forecast"]
     b.table("Monthly Forecast", fc[[c for c in mcols if c in fc.columns]],
             widths={"Label": 36, "Method": 34, "Models": 34, "Date": 11},
-            formats={"Overlay_Multiplier": "dec", "Horizon": ""}, conf_col="Confidence",
+            formats={"Overlay_Multiplier": "dec", "Horizon": ""}, conf_col="Reliability",
             note="Base_Forecast = before reconciliation. Forecast = reconciled baseline (use this).")
     b.table("Fiscal Periods", res.periods, widths={"Label": 36},
             formats={"YoY_Pct": "pct_plain", "Months_Actual": "", "Months_Forecast": ""},
@@ -229,7 +235,7 @@ def write_workbook(res, path: Path) -> Path:
     # ── staffing & analysis sheets ──────────────────────────────────────
     st = getattr(res, "staffing", pd.DataFrame())
     if st is not None and len(st):
-        stc = st.drop(columns=["Level", "Country", "Region"], errors="ignore")
+        stc = st.drop(columns=["Country", "Region"], errors="ignore")
         wss = b.table("Staffing Calendar", stc, widths={"Label": 30},
                       formats={"Load_Index": "dec", "FTE_Base": "dec", "FTE_Capacity_80": "dec"},
                       note="Next 12 months. Workload High / Low = at least 10% above / below the average forecast month. "
@@ -353,9 +359,9 @@ def write_workbook(res, path: Path) -> Path:
     meta = res.nodes[["node_id", "Level", "Country", "Region", "Metric", "Months_Of_History"]]
     ev = meta.merge(res.selection, on="node_id", how="right")
     ev["Label"] = [ev_label(l, c, r_) for l, c, r_ in zip(ev["Level"], ev["Country"], ev["Region"])]
-    conf = fc.drop_duplicates("node_id").set_index("node_id")["Confidence"]
-    ev["Confidence"] = ev["node_id"].map(conf)
-    ecols = ["Label", "Metric", "Level", "Method", "Selected_Models", "Confidence", "Selection_Reason", "Best_Model",
+    conf = fc.drop_duplicates("node_id").set_index("node_id")["Reliability"]
+    ev["Reliability"] = ev["node_id"].map(conf)
+    ecols = ["Label", "Metric", "Level", "Method", "Selected_Models", "Reliability", "Selection_Reason", "Best_Model",
              "Runner_Up", "Margin_Best_vs_RunnerUp_Pct", "Best_HB_MAE", "Benchmark_HB_MAE", "Honest_WAPE_Policy",
              "Honest_WAPE_Benchmark", "Honest_Skill_vs_Benchmark", "Honest_N", "N_Candidates", "N_Origins",
              "Required_Train_Months", "Eligible_Models", "Months_Of_History"]
@@ -364,7 +370,7 @@ def write_workbook(res, path: Path) -> Path:
             formats={"Margin_Best_vs_RunnerUp_Pct": "pct_plain", "Honest_WAPE_Policy": "dec",
                      "Honest_WAPE_Benchmark": "dec", "Honest_Skill_vs_Benchmark": "dec", "Honest_N": "",
                      "N_Candidates": "", "N_Origins": "", "Required_Train_Months": "", "Months_Of_History": ""},
-            conf_col="Confidence",
+            conf_col="Reliability",
             note="Why each series uses its method. Honest_* = walk-forward replay of the selection rule (no selection bias). "
                  "Skill > 0 means better than 'same month last year'.")
     sc = meta.merge(res.scores, on="node_id", how="right")
@@ -396,13 +402,22 @@ def write_workbook(res, path: Path) -> Path:
         b.table("Reconciliation Test", rtw, formats={c: "pct_plain" for c in rtw.columns[2:]},
                 note="Walk-forward error (WAPE %) of each way of making regions, countries and the organisation add up; "
                      f"'none' = each level forecast on its own. Chosen: '{res.manifest.get('reconciliation_method_chosen', '')}'.")
+    cal_fmt["Width_Factor"] = "dec"
+    rtest = getattr(res, "range_test", None)
+    if rtest is not None and len(rtest):
+        b.table("Range Method Test", rtest,
+                formats={"Coverage_Pct": "pct_plain", "Median_Width_Pct": "pct_plain", "Interval_Score": "dec", "N": ""},
+                note="How each way of building a range would have performed, replayed at each of the last test origins "
+                     "with only the errors known at the time. Interval score = width + penalty for misses (lower is "
+                     "better; a proper scoring rule). Chosen = used for that group and window. 'centred' = symmetric "
+                     "around the forecast; 'empirical' = past error quantiles (may be skewed).")
     b.table("Interval Calibration", res.calibration, formats=cal_fmt,
-            note="Monthly ranges. Coverage = share of walk-forward actuals inside the range, measured with ranges "
-                 "fitted only on earlier errors. Offsets (log scale) are added to each tail so it reaches its target.")
+            note="Monthly ranges. Coverage = share of test actuals inside the range fitted only on earlier errors. "
+                 "Width factor (0.8-1.5) scales both sides equally when coverage was clearly off target.")
     bc = getattr(res, "block_calibration", None)
     if bc is not None and len(bc):
         b.table("Interval Calibration", bc, formats=cal_fmt, start_row=len(res.calibration) + 5,
-                note="Ranges for next 3/6/12-month totals (offsets in standardised units).")
+                note="Ranges for next 3/6/12-month totals.")
     b.table("Model Catalogue", res.catalogue, widths={"Description": 90},
             formats={"Median_Error_vs_Benchmark": "dec", "Pct_Series_Beating_Benchmark": "pct_plain",
                      "Min_History_Months": "", "Series_Using_Model": ""})

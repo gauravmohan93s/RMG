@@ -32,6 +32,8 @@ from . import guardrails as gr
 from . import intervals as iv
 from . import overlay as ov
 from . import reconcile as rc
+from . import ranges as rg
+from . import reliability as rl
 from . import selection as sel
 from .backtest import run_backtest
 from .models import model_catalogue, pooled_seasonal_forecast, seasonal_index
@@ -60,6 +62,7 @@ class RunResult:
     policy_comparison: pd.DataFrame
     calibration: pd.DataFrame
     block_calibration: pd.DataFrame
+    range_test: pd.DataFrame
     guardrails: pd.DataFrame
     overlay_rules: pd.DataFrame
     catalogue: pd.DataFrame
@@ -68,6 +71,7 @@ class RunResult:
     bias_test: pd.DataFrame
     bias_estimates: pd.DataFrame
     reconciliation_test: pd.DataFrame
+    point_estimate_test: pd.DataFrame
     seasonal_index: pd.DataFrame
     seasonal_by_year: pd.DataFrame
     staffing: pd.DataFrame
@@ -97,6 +101,7 @@ ARTEFACTS = {
     "policy_comparison": "Evaluation/policy_comparison.csv",
     "calibration": "Evaluation/interval_calibration.csv",
     "block_calibration": "Evaluation/total_interval_calibration.csv",
+    "range_test": "Evaluation/range_method_test.csv",
     "guardrails": "Evaluation/guardrails.csv",
     "catalogue": "Evaluation/model_catalogue.csv",
     "failures": "Evaluation/model_failures.csv",
@@ -104,6 +109,7 @@ ARTEFACTS = {
     "bias_test": "Evaluation/statistical_overlay_test.csv",
     "bias_estimates": "Evaluation/statistical_overlay_estimates.csv",
     "reconciliation_test": "Evaluation/reconciliation_test.csv",
+    "point_estimate_test": "Evaluation/point_estimate_test.csv",
     "seasonal_index": "Analysis/seasonal_index.csv",
     "seasonal_by_year": "Analysis/seasonal_by_year.csv",
     "staffing": "Analysis/staffing_calendar.csv",
@@ -206,6 +212,18 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
                     f"(shrunk estimate from the last {bcfg.window} realised months).")
     selection["Statistical_Overlay"] = selection["node_id"].map(
         bias_est.set_index("node_id")["Correction_Log"].map(np.exp) if bias_mode != "none" else {}).fillna(1.0)
+
+    # point estimate: typical month (median) vs expected value (smearing-corrected mean) — the one
+    # that gives more accurate quarter totals across levels in the walk-forward test is published
+    smear_test, smear_honest = bc.smearing_test(comb_bt, honest, tour)
+    pe = settings.point_estimate
+    use_mean = pe == "mean" or (pe == "auto" and bc.decide_smearing(smear_test))
+    if use_mean and smear_honest is not None:
+        f_now = bc.smearing_factors(comb_bt, T - 1)
+        base["Pred"] = base["Pred"].to_numpy() * base["node_id"].map(f_now).fillna(1.0).to_numpy()
+        comb_bt = comb_bt.assign(Pred=comb_bt["Pred"].to_numpy() * comb_bt["node_id"].map(f_now).fillna(1.0).to_numpy())
+        honest = honest.assign(Policy=smear_honest)
+    point_estimate_used = "mean (smearing-corrected)" if use_mean else "median (typical month)"
     refs = pd.DataFrame({nid: gr.references(panel.y[nid]) for nid in tour["node_id"]}).T
     guards = gr.plausibility(base, refs, settings.guardrails.min_ratio, settings.guardrails.max_ratio)
     for _, g in guards[guards["Guardrail_Triggered"]].iterrows():
@@ -253,29 +271,12 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
         honest = honest.drop(columns="Pred")
 
     # 5) intervals ──────────────────────────────────────────────────────────
-    q, pooled = iv.residual_quantiles(comb_bt, tour, levels, settings.intervals.min_obs, H)
-    # split-conformal: the calibration check uses quantiles fitted only on errors realised
-    # before the walk-forward window, so tested errors never helped build the interval
-    q_fit, early = None, None
-    if not honest.empty:
-        early = comb_bt[comb_bt["t"] <= honest["o"].min()]
-        if len(early):
-            q_fit, _ = iv.residual_quantiles(early, tour, levels, settings.intervals.min_obs, H)
-    q, calib = iv.calibrate(q, honest, nodes, levels, settings.intervals.max_offset,
-                            settings.intervals.calibrate, q_fit=q_fit)
-    extra = []
-    for _, n in emer.iterrows():
-        for h in range(1, H + 1):
-            qq, nn = iv.pooled_quantiles(pooled, n["Metric"], n["Level"], h)
-            row = {"node_id": n["node_id"], "h": h, "Source": "pooled (emerging)", "N": nn}
-            for L in levels:
-                d_lo, d_hi = iv.calibration_offsets(calib, n["Metric"], n["Level"], h, L)
-                row[f"q_lo{L}"], row[f"q_hi{L}"] = qq[f"q_lo{L}"] - d_lo, qq[f"q_hi{L}"] + d_hi
-            extra.append(row)
-    if extra:
-        q = iv._enforce(pd.concat([q, pd.DataFrame(extra)], ignore_index=True), levels)
-    bq, block_calib = iv.block_quantiles(comb_bt, nodes, levels, settings.intervals.min_obs, honest,
-                                         settings.intervals.max_offset, comb_fit=early)
+    # ranges are built from the errors of the forecasts as PUBLISHED (e.g. regions summed bottom-up)
+    comb_pub = rl.published_backtest(comb_bt, tour, recon_method)
+    # the way errors become a range (empirical quantiles vs centred robust spread) is chosen per level
+    # group and window by a proper scoring rule, replayed with only the errors realised at each origin
+    q, bq, range_test, calib, block_calib = rg.build(comb_pub, nodes, levels, settings.intervals.min_obs, H,
+                                                     settings.selection.honest_eval_origins)
     lap("intervals")
 
     # 6) reconciliation ─────────────────────────────────────────────────────
@@ -309,7 +310,11 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
     selc = selection.set_index("node_id")
     fc["Method"] = fc["node_id"].map(selc["Method"])
     fc["Models"] = fc["node_id"].map(selc["Selected_Models"])
-    fc["Confidence"] = fc["node_id"].map(_confidence(selection))
+    relt = rl.reliability(honest, nodes).set_index("node_id")
+    fc["Reliability"] = fc["node_id"].map(relt["Reliability"]).fillna("New")
+    fc["Typical_Quarter_Error_Pct"] = fc["node_id"].map(relt["Typical_Quarter_Error_Pct"])
+    guard_ids = set(guards.loc[guards["Guardrail_Triggered"], "node_id"]) if len(guards) else set()
+    fc.loc[fc["node_id"].isin(guard_ids), "Reliability"] = "Review"
     fc["Source_Node"] = fc["node_id"]
 
     # single-region countries: country total = its region
@@ -348,7 +353,11 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
     accuracy = sel.accuracy_by_horizon(honest, bt.preds, nodes)
     scfg = settings.seasonality
     sidx, syear = seas.seasonal_indices(panel.history, scfg.high_threshold, scfg.low_threshold, scfg.years)
-    staffing = seas.staffing_calendar(fc, sidx, scfg.high_threshold, scfg.low_threshold, scfg.apps_per_fte_month)
+    prod, prod_source = sig.load_sheet(settings_file, "Staffing_Productivity",
+                                       CODE_ROOT / "config" / "staffing_productivity_template.csv",
+                                       seas.PRODUCTIVITY_COLS)
+    staffing = seas.staffing_calendar(fc, sidx, scfg.high_threshold, scfg.low_threshold, scfg.apps_per_fte_month,
+                                      productivity=prod)
     ev_raw, events_source = sig.load_sheet(settings_file, "Policy_Events",
                                            CODE_ROOT / "config" / "policy_events_template.csv", sig.EVENT_COLS)
     events = sig.measure_events(ev_raw, panel.history)
@@ -382,6 +391,9 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
         "config": settings.as_dict(),
         "reconciliation_method_used": recon_used,
         "reconciliation_method_chosen": recon_method,
+        "point_estimate_used": point_estimate_used,
+        "range_methods_chosen": ({f"{g} | {w}": m for g, w, m in range_test.loc[range_test["Chosen"], ["Group", "Window", "Method"]]
+                                  .drop_duplicates(["Group", "Window"]).itertuples(index=False)} if len(range_test) else {}),
         "overlay_source": overlay_source,
         "overlay_rules_applied": int((rules["Applied_Status"] == "Applied").sum()),
         "guardrails_triggered": int(guards["Guardrail_Triggered"].sum()),
@@ -392,6 +404,7 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
         "statistical_overlay_mode": bias_mode,
         "human_inputs_source": human_source, "human_inputs_rows": int(len(hi)),
         "policy_events_source": events_source,
+        "staffing_productivity_source": prod_source,
         "intake_extract": (str(intake_file) if intake_df is not None and len(intake_df) else "not available"),
         "intake_known_share": i_known,
     })
@@ -399,9 +412,9 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
     res = RunResult(out_dir=out_dir, run_id=run_id, run_date=run_date, last_actual=last_actual,
                     forecast=fc, totals=totals, periods=periods, history=panel.history, nodes=nodes,
                     series_status=panel.series_status, dq=panel.dq, scores=scores, selection=selection,
-                    accuracy=accuracy, policy_comparison=policy_cmp, calibration=calib, block_calibration=block_calib, guardrails=guards, overlay_rules=rules,
+                    accuracy=accuracy, policy_comparison=policy_cmp, calibration=calib, block_calibration=block_calib, range_test=range_test, guardrails=guards, overlay_rules=rules,
                     catalogue=catalogue, failures=bt.failures, track_scorecard=track_sc,
-                    bias_test=bias_test, bias_estimates=bias_est, reconciliation_test=recon_test, seasonal_index=sidx, seasonal_by_year=syear,
+                    bias_test=bias_test, bias_estimates=bias_est, reconciliation_test=recon_test, point_estimate_test=smear_test, seasonal_index=sidx, seasonal_by_year=syear,
                     staffing=staffing, forecast_vs_actual=fva, fva_summary=fva_sum, human_scores=human_scores,
                     events=events, intake_arrivals=i_arr, intake_lead_profile=i_lead, intake_month_mix=i_mix,
                     manifest=manifest)
@@ -416,23 +429,6 @@ _LEVEL_ORDER = {"Organisation": 0, "Country": 1, "Region": 2}
 
 def _level_sort(s: pd.Series) -> pd.Series:
     return s.map(_LEVEL_ORDER) if s.name == "Level" else s
-
-
-def _confidence(selection: pd.DataFrame) -> pd.Series:
-    """Reporting label from the honest walk-forward WAPE (thresholds documented in METHODOLOGY)."""
-    out = {}
-    for _, r in selection.iterrows():
-        method = str(r.get("Method", ""))
-        w = r.get("Honest_WAPE_Policy", np.nan)
-        if method.startswith("Emerging") or method.startswith("Guardrail") or not np.isfinite(w):
-            out[r["node_id"]] = "Low"
-        elif w <= 0.15:
-            out[r["node_id"]] = "High"
-        elif w <= 0.30:
-            out[r["node_id"]] = "Medium"
-        else:
-            out[r["node_id"]] = "Low"
-    return pd.Series(out)
 
 
 def _apply_overlay(fc: pd.DataFrame, rules: pd.DataFrame, levels) -> pd.DataFrame:
@@ -477,7 +473,8 @@ def _totals(fc: pd.DataFrame, bq: pd.DataFrame, history: pd.DataFrame, levels) -
                    "From": gk["Date"].min(), "To": gk["Date"].max(),
                    "Forecast": point, "Forecast_Adjusted": adj, "Same_Months_Last_Year": ly,
                    "YoY_Pct": 100 * (point / ly - 1) if ly > 0 else np.nan,
-                   "Confidence": g["Confidence"].iloc[0]}
+                   "Reliability": g["Reliability"].iloc[0],
+                   "Typical_Quarter_Error_Pct": g["Typical_Quarter_Error_Pct"].iloc[0]}
             if (src, k) in bqi.index:
                 qq = bqi.loc[(src, k)]
                 for L in levels:

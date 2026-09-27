@@ -19,6 +19,9 @@ inactive_months = 6
 min_months_for_tournament = 18
 # The fiscal year starts in April (FY27 = Apr-2026 .. Mar-2027).
 fin_year_start_month = 4
+# First month used for modelling ("" = all history). Changing it is a methodology change:
+# test walk-forward first (docs/experiments). Env override: RMG_TRAIN_START.
+train_start = ""
 
 [backtest]
 horizon = 12       # months ahead that are forecast AND evaluated
@@ -65,10 +68,16 @@ honest_eval_origins = 12
 fallback_if_skill_below = -0.05
 
 [intervals]
-levels = [80, 95]
+levels = [50, 80, 95]            # 50% = 'most likely range', 80% = planning range
 min_obs = 8                      # residuals needed per node/horizon, else pooled
 calibrate = true                 # conformal offsets so each tail hits nominal coverage walk-forward
 max_offset = 1.5                 # cap on a conformal offset (log scale; 1.5 ~ x4.5)
+
+[forecast]
+# "auto" = publish expected values (smearing-corrected means, which add up correctly) only if they
+# give more accurate quarter totals across levels in the walk-forward test (>= 3% better);
+# "median" = typical month; "mean" = always expected value.
+point_estimate = "auto"
 
 [reconciliation]
 # "auto" = replay bottom_up / wls_var / mint_shrink walk-forward each run and use the most accurate
@@ -96,7 +105,7 @@ min_gain_pct = 1.0
 high_threshold = 1.10
 low_threshold = 0.90
 years = 4                        # most recent years used for the seasonal index
-apps_per_fte_month = 0           # set (e.g. 120) to convert volumes into FTE; 0 = off
+apps_per_fte_month = 0           # fallback only; set per country/region in Settings.xlsx!Staffing_Productivity
 
 [overlay]
 # Business adjustments; only rows with Status = "Approved" are applied.

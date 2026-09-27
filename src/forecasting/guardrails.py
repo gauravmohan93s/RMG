@@ -51,7 +51,9 @@ def check_invariants(fc: pd.DataFrame, last_actual: pd.Timestamp, levels=(80, 95
     for L in levels:
         lo, hi = fc[f"Lo{L}"], fc[f"Hi{L}"]
         problems[f"point_outside_{L}"] = int(((fc["Forecast"] < lo - 1e-6) | (fc["Forecast"] > hi + 1e-6)).sum())
-    problems["interval_not_nested"] = int(((fc["Lo95"] > fc["Lo80"] + 1e-6) | (fc["Hi95"] < fc["Hi80"] - 1e-6)).sum())
+    lv = sorted(levels)
+    problems["interval_not_nested"] = int(sum(((fc[f"Lo{w}"] > fc[f"Lo{n}"] + 1e-6) | (fc[f"Hi{w}"] < fc[f"Hi{n}"] - 1e-6)).sum()
+                                              for n, w in zip(lv[:-1], lv[1:])))
     bad = {k: v for k, v in problems.items() if v}
     assert not bad, f"Forecast invariants violated: {bad}"
     return problems

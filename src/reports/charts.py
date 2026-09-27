@@ -40,7 +40,7 @@ def _png(fig) -> bytes:
 
 def history_forecast(hist: pd.DataFrame, fc: pd.DataFrame, metric: str, title: str,
                      months_back: int = 36, size=(6.2, 2.6)) -> bytes:
-    """Actuals (last N months) + forecast with 80% band for one node/metric."""
+    """Actuals (last N months) + forecast with 50% and 80% bands for one node/metric."""
     color = SERIES.get(metric, SERIES["Received"])
     h = hist.sort_values("Date").tail(months_back)
     f = fc.sort_values("Date")
@@ -48,15 +48,17 @@ def history_forecast(hist: pd.DataFrame, fc: pd.DataFrame, metric: str, title: s
     fig.patch.set_facecolor(SURFACE)
     _style(ax)
     ax.plot(h["Date"], h["Actual"], color=INK_2, lw=1.6, label="Actual")
-    ax.fill_between(f["Date"], f["Lo80"], f["Hi80"], color=color, alpha=0.18, lw=0, label="80% range")
+    ax.fill_between(f["Date"], f["Lo80"], f["Hi80"], color=color, alpha=0.13, lw=0, label="Planning range (8 in 10)")
+    if "Lo50" in f and f["Lo50"].notna().any():
+        ax.fill_between(f["Date"], f["Lo50"], f["Hi50"], color=color, alpha=0.28, lw=0, label="Most likely (1 in 2)")
     ax.plot(f["Date"], f["Forecast"], color=color, lw=2.0, label="Forecast")
     if len(h) and len(f):   # visually join actual to forecast
         ax.plot([h["Date"].iloc[-1], f["Date"].iloc[0]], [h["Actual"].iloc[-1], f["Forecast"].iloc[0]],
                 color=color, lw=1.2, ls=":")
         ax.axvline(h["Date"].iloc[-1], color=GRID, lw=1)
     ax.set_title(title, fontsize=9, color=INK, loc="left", pad=4)
-    ax.legend(fontsize=7, frameon=False, loc="upper left", ncols=3)
-    ax.set_ylim(bottom=0)
+    ax.legend(fontsize=6.5, frameon=False, loc="upper left", ncols=4)
+    ax.set_ylim(bottom=0, top=1.18 * max(h["Actual"].max() if len(h) else 0, f["Hi80"].max() if len(f) else 0))
     ax.set_ylabel(f"Applications {metric.lower()} / month", fontsize=7, color=INK_2)
     if len(f):   # label the forecast peak and the first/last forecast month
         for idx in {f["Forecast"].idxmax(), f.index[0], f.index[-1]}:

@@ -81,4 +81,15 @@ def test_block_quantiles_are_pooled_and_signed():
     bq, _ = iv.block_quantiles(comb, nodes, LEVELS, min_obs=8)
     assert set(bq["k"]) == {3, 6, 12}
     assert (bq["q_lo80"] <= 0).all() and (bq["q_hi80"] >= 0).all()
-    assert bq["Source"].str.contains("scale").all()
+    assert bq["Source"].str.contains("own totals|pooled").all()
+
+
+def test_over_wide_intervals_are_narrowed_within_bounds():
+    rng = np.random.default_rng(3)
+    r = rng.normal(0, 0.05, 400)
+    wide_lo, wide_hi = np.full(400, -0.2), np.full(400, 0.2)          # ~100% coverage: far too wide
+    c = iv._narrowing_factor(wide_lo, wide_hi, r, 80)
+    assert iv.NARROW_FLOOR <= c < 1.0
+    ok_lo, ok_hi = np.full(400, -0.064), np.full(400, 0.064)          # ~80% coverage: leave alone
+    assert iv._narrowing_factor(ok_lo, ok_hi, r, 80) == 1.0
+    assert iv._narrowing_factor(wide_lo[:10], wide_hi[:10], r[:10], 80) == 1.0   # too little evidence

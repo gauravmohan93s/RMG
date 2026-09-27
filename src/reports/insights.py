@@ -40,23 +40,59 @@ def fiscal_year_outlook(res) -> pd.DataFrame:
 
 
 def country_table(res) -> pd.DataFrame:
-    t = res.totals[(res.totals["Window"] == "Next 12 months") & res.totals["Level"].isin(["Country", "Organisation"])]
+    """Organisation + countries: next 12 months, next quarter, range, change, reliability (receipts & submissions)."""
+    t = res.totals[res.totals["Level"].isin(["Country", "Organisation"])]
     rows = []
     for (lvl, cty), g in t.groupby(["Level", "Country"], sort=False):
         row = {"Level": lvl, "Country": g["Label"].iloc[0]}
         for m in METRICS:
-            r = g[g["Metric"] == m]
-            if r.empty:
+            r12 = g[(g["Metric"] == m) & (g["Window"] == "Next 12 months")]
+            r3 = g[(g["Metric"] == m) & (g["Window"] == "Next 3 months")]
+            if r12.empty:
                 continue
-            r = r.iloc[0]
-            row.update({f"{m}_Forecast": r["Forecast"], f"{m}_Lo80": r.get("Lo80", np.nan),
-                        f"{m}_Hi80": r.get("Hi80", np.nan), f"{m}_Last_Year": r["Same_Months_Last_Year"],
-                        f"{m}_YoY_Pct": r["YoY_Pct"], f"{m}_Adjusted": r["Forecast_Adjusted"],
-                        f"{m}_Confidence": r["Confidence"]})
+            r12 = r12.iloc[0]
+            row.update({f"{m}_Forecast": r12["Forecast"], f"{m}_Lo80": r12.get("Lo80", np.nan),
+                        f"{m}_Hi80": r12.get("Hi80", np.nan), f"{m}_Last_Year": r12["Same_Months_Last_Year"],
+                        f"{m}_YoY_Pct": r12["YoY_Pct"], f"{m}_Adjusted": r12["Forecast_Adjusted"],
+                        f"{m}_Reliability": r12.get("Reliability", ""),
+                        f"{m}_Quarter_Error_Pct": r12.get("Typical_Quarter_Error_Pct", np.nan)})
+            if len(r3):
+                row.update({f"{m}_Next_Quarter": r3.iloc[0]["Forecast"], f"{m}_NQ_Lo80": r3.iloc[0].get("Lo80", np.nan),
+                            f"{m}_NQ_Hi80": r3.iloc[0].get("Hi80", np.nan)})
         rows.append(row)
     df = pd.DataFrame(rows)
     df["_o"] = (df["Level"] != "Organisation").astype(int)
     return df.sort_values(["_o", "Received_Forecast"], ascending=[True, False]).drop(columns="_o")
+
+
+def reliability_summary(res, metric: str = "Received") -> pd.DataFrame:
+    """Share of next-12-month volume (regions) in each reliability band."""
+    fc = res.forecast
+    r = fc[(fc["Level"] == "Region") & (fc["Metric"] == metric)]
+    if r.empty or "Reliability" not in r.columns:
+        return pd.DataFrame()
+    v = r.groupby(["node_id", "Reliability"])["Forecast"].sum().reset_index()
+    t = v.groupby("Reliability").agg(Series=("node_id", "nunique"), Volume=("Forecast", "sum"))
+    t["Volume_Share_Pct"] = 100 * t["Volume"] / t["Volume"].sum()
+    order = {"High": 0, "Medium": 1, "Low": 2, "New": 3, "Review": 4}
+    return t.reset_index().sort_values("Reliability", key=lambda x: x.map(order))
+
+
+def busy_months(res, metric: str = "Received"):
+    si = getattr(res, "seasonal_index", None)
+    if si is None or si.empty:
+        return [], []
+    o = si[(si["Level"] == "Organisation") & (si["Metric"] == metric)].sort_values("Seasonal_Index", ascending=False)
+    return o[o["Class"] == "High"]["Month_Name"].tolist(), o[o["Class"] == "Low"]["Month_Name"].tolist()
+
+
+def _join(xs):
+    xs = list(xs)
+    return xs[0] if len(xs) == 1 else ", ".join(xs[:-1]) + " and " + xs[-1] if xs else ""
+
+
+def _round(v, step=100):
+    return fmt_int(round(v / step) * step) if v is not None and np.isfinite(v) else "–"
 
 
 def policy_label(res) -> str:
@@ -109,57 +145,58 @@ def overall_bias(res, metric: str, level: str = "Organisation") -> float:
 
 
 def messages(res) -> List[str]:
+    """Plain-language key messages for executives (no statistical jargon)."""
     k = kpis(res)
+    out = []
+    r12, s12, r3 = k["Received"]["Next 12 months"], k["Submitted"]["Next 12 months"], k["Received"].get("Next 3 months")
+    out.append(f"We expect about {_round(r12['Forecast'])} applications to be received over the next 12 months "
+               f"({r12['From']:%b %Y}–{r12['To']:%b %Y}), {fmt_pct(r12['YoY_Pct'])} compared with the same months last "
+               f"year. Most likely between {_round(r12.get('Lo50'), 1000)} and {_round(r12.get('Hi50'), 1000)} "
+               f"(an even chance); plan for {_round(r12.get('Lo80'), 1000)} to {_round(r12.get('Hi80'), 1000)} "
+               f"(8 times in 10).")
+    if r3 is not None:
+        out.append(f"Next quarter ({r3['From']:%b}–{r3['To']:%b %Y}): about {_round(r3['Forecast'])} applications received "
+                   f"(most likely {_round(r3.get('Lo50'), 1000)}–{_round(r3.get('Hi50'), 1000)}; plan for "
+                   f"{_round(r3.get('Lo80'), 1000)}–{_round(r3.get('Hi80'), 1000)}).")
+    c = conversion(res)
+    out.append(f"About {_round(s12['Forecast'])} applications are expected to be submitted ({fmt_pct(s12['YoY_Pct'])}) — "
+               f"roughly {c['forecast']:.0f} of every 100 received, in line with last year ({c['last_year']:.0f}).")
     ct = country_table(res)
     ct = ct[ct["Level"] == "Country"].copy()
-    out = []
-    for m, noun in (("Received", "Applications received"), ("Submitted", "Applications submitted")):
-        r = k[m]["Next 12 months"]
-        out.append(f"{noun} are forecast at {fmt_int(r['Forecast'])} over the next 12 months "
-                   f"({r['From']:%b %Y}–{r['To']:%b %Y}); 80% range {fmt_int(r.get('Lo80'))}–{fmt_int(r.get('Hi80'))}, "
-                   f"{fmt_pct(r['YoY_Pct'])} vs the same months last year ({fmt_int(r['Same_Months_Last_Year'])}).")
-    c = conversion(res)
-    out.append(f"Implied submission-to-receipt ratio: {fmt_pct(c['forecast'], False)} "
-               f"(same months last year {fmt_pct(c['last_year'], False)}).")
     if len(ct):
         ct["chg"] = ct["Received_Forecast"] - ct["Received_Last_Year"]
-        up = ct.sort_values("chg", ascending=False).head(3)
-        up = up[up["chg"] > 0]
+        up = ct[ct["chg"] > 0].sort_values("chg", ascending=False).head(3)
         if len(up):
-            out.append("Largest growth in receipts: " + "; ".join(
-                f"{r.Country} {fmt_int(r.chg)} ({fmt_pct(r.Received_YoY_Pct)})" for r in up.itertuples()) + ".")
+            out.append("Most of the growth comes from " + _join(
+                [f"{r.Country} (+{_round(r.chg)})" for r in up.itertuples()]) + ".")
         dn = ct[ct["chg"] < 0].sort_values("chg").head(3)
         if len(dn):
-            out.append("Forecast declines: " + "; ".join(
-                f"{r.Country} {fmt_int(r.chg)} ({fmt_pct(r.Received_YoY_Pct)})" for r in dn.itertuples()) + ".")
-    acc = accuracy_buckets(res, "Received")
-    if np.isfinite(acc.get("1-3", np.nan)):
-        out.append(f"Tested on the past 12 forecast origins, the organisation receipts forecast was off by "
-                   f"{acc['1-3']:.0f}% per month on average 1–3 months ahead and {acc.get('7-12', np.nan):.0f}% "
-                   "7–12 months ahead — plan on the 80% range, not the single number, beyond 6 months.")
+            txt = "Expected to decline: " + _join([f"{r.Country} ({_round(r.chg)})" for r in dn.itertuples()]) + "."
+            if len(up):
+                out[-1] += " " + txt
+            else:
+                out.append(txt)
+    busy, quiet = busy_months(res)
+    if busy:
+        out.append(f"Busiest months are typically {_join(busy)}; quietest are {_join(quiet)} — see the staffing calendar.")
+    org = res.forecast[(res.forecast["Level"] == "Organisation") & (res.forecast["Metric"] == "Received")]
+    err = float(org["Typical_Quarter_Error_Pct"].iloc[0]) if len(org) and "Typical_Quarter_Error_Pct" in org else np.nan
+    if np.isfinite(err):
+        out.append(f"How far to trust it: tested on the past year, our organisation-level quarterly forecasts were "
+                   f"typically within ±{err:.0f}% of what actually happened.")
     b = overall_bias(res, "Received")
-    if np.isfinite(b) and abs(b) >= 5:
-        direction, why, stance = (("above", "growth outpaced history", "conservative") if b < 0 else
-                                  ("below", "a slowdown the history did not show", "optimistic"))
-        out.append(f"In that test, actual receipts ran on average {abs(b):.0f}% {direction} the forecast "
-                   f"({why}), so treat the baseline as {stance}.")
-    rt = getattr(res, "reconciliation_test", None)
-    chosen = res.manifest.get("reconciliation_method_chosen", "")
-    if rt is not None and len(rt) and chosen:
-        o = rt[(rt["Level"] == "Organisation") & (rt["Metric"] == "Received")].set_index("Method")["WAPE_Pct"]
-        if "none" in o and chosen in o and o["none"] > 0:
-            label = {"bottom_up": "summing the regional forecasts", "wls_var": "variance-weighted reconciliation",
-                     "mint_shrink": "MinT reconciliation"}.get(chosen, chosen)
-            out.append(f"Organisation totals are built by {label}: {100 * (1 - o[chosen] / o['none']):.0f}% more accurate "
-                       f"in testing ({o[chosen]:.0f}% vs {o['none']:.0f}% error) than forecasting the total on its own.")
-    n_guard = int(res.guardrails["Guardrail_Triggered"].sum()) if len(res.guardrails) else 0
-    n_emerg = int(((res.selection["Method"].str.startswith("Emerging")) &
-                   (res.selection["node_id"].str.startswith("Received"))).sum())
-    if n_guard or n_emerg:
-        out.append(f"{n_guard} series were capped by plausibility guardrails and {n_emerg} new series have too "
-                   "little history to test — both are marked low confidence (see Guardrails / Data Quality).")
+    if np.isfinite(b) and b <= -5:
+        out.append(f"Actual volumes have recently been running above our forecasts (by about {abs(b):.0f}%), so these "
+                   "numbers lean cautious — for peak months, plan capacity towards the upper end of the range.")
+    elif np.isfinite(b) and b >= 5:
+        out.append(f"Actual volumes have recently come in below our forecasts (by about {b:.0f}%), so treat the upper "
+                   "end of the range with caution.")
+    rs = reliability_summary(res)
+    if len(rs):
+        hm = rs[rs["Reliability"].isin(["High", "Medium"])]["Volume_Share_Pct"].sum()
+        out.append(f"{hm:.0f}% of forecast volume is in markets we can forecast with high or medium reliability; the rest "
+                   "is mostly small or new markets, where swings are proportionally larger.")
     applied = int((res.overlay_rules.get("Applied_Status", pd.Series(dtype=str)) == "Applied").sum())
-    out.append("No business/policy adjustments are approved: all figures are the statistical baseline."
-               if applied == 0 else
-               f"{applied} approved policy adjustment(s) applied — see 'Adjusted' columns and the Policy Overlay sheet.")
+    out.append("No manual adjustments have been made: all figures come directly from the data." if applied == 0 else
+               f"{applied} approved management adjustment(s) are included in the 'Adjusted' figures.")
     return out

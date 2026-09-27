@@ -28,16 +28,33 @@ def test_seasonal_index_recovers_known_pattern():
     assert ix.loc[2, "Consistency_Pct"] == 100 and len(yr) > 0
 
 
-def test_staffing_calendar_load_index():
+def test_staffing_calendar_load_index_and_region_specific_fte():
     dates = pd.date_range("2027-01-01", periods=12, freq="MS")
     f = 1000 * PATTERN
-    fc = pd.DataFrame({"Level": "Organisation", "Country": "_ORG", "Region": "_TOTAL", "Metric": "Received",
-                       "Label": "Organisation", "Date": dates, "Forecast": f, "Lo80": f * 0.8, "Hi80": f * 1.2})
+    base = dict(Metric="Received", Date=dates, Lo80=f * 0.8)
+    fc = pd.concat([
+        pd.DataFrame({"Level": "Organisation", "Country": "_ORG", "Region": "_TOTAL", "Label": "Organisation",
+                      "Forecast": 2 * f, "Hi80": 2 * f * 1.2, **base}),
+        pd.DataFrame({"Level": "Country", "Country": "UK", "Region": "_TOTAL", "Label": "UK",
+                      "Forecast": 2 * f, "Hi80": 2 * f * 1.2, **base}),
+        pd.DataFrame({"Level": "Region", "Country": "UK", "Region": "North", "Label": "UK – North",
+                      "Forecast": f, "Hi80": f * 1.2, **base}),
+        pd.DataFrame({"Level": "Region", "Country": "UK", "Region": "South", "Label": "UK – South",
+                      "Forecast": f, "Hi80": f * 1.2, **base}),
+    ])
     ix, _ = seas.seasonal_indices(org_history())
-    st = seas.staffing_calendar(fc, ix, apps_per_fte_month=100).set_index("Month_Name")
-    assert st.loc["Feb", "Workload_Class"] == "High" and st.loc["Dec", "Workload_Class"] == "Low"
-    assert np.isclose(st.loc["Feb", "FTE_Capacity_80"], 1000 * 1.4 * 1.2 / 100)
-    assert np.isclose(st["Load_Index"].mean(), 1.0)
+    prod = pd.DataFrame([{"Country": "UK", "Region": "North", "Metric": "*", "Apps_Per_FTE_Month": 100},
+                         {"Country": "UK", "Region": "*", "Metric": "*", "Apps_Per_FTE_Month": 50}])
+    st = seas.staffing_calendar(fc, ix, productivity=prod)
+    feb = st[st["Month_Name"] == "Feb"].set_index(["Level", "Region"])
+    assert feb.loc[("Organisation", "_TOTAL"), "Workload_Class"] == "High"
+    n, s_ = feb.loc[("Region", "North"), "FTE_Base"], feb.loc[("Region", "South"), "FTE_Base"]
+    assert np.isclose(n, 1400 / 100) and np.isclose(s_, 1400 / 50)          # region-specific rates
+    assert np.isclose(feb.loc[("Country", "_TOTAL"), "FTE_Base"], n + s_)     # country = sum of regions
+    assert np.isclose(feb.loc[("Organisation", "_TOTAL"), "FTE_Base"], n + s_)
+    assert np.isclose(st[st["Level"] == "Organisation"]["Load_Index"].mean(), 1.0)
+    no_rates = seas.staffing_calendar(fc, ix)
+    assert "FTE_Base" not in no_rates.columns
 
 
 def comb_frame(bias_node_ratio=1.2, n_nodes=10, seed=0):
