@@ -59,6 +59,7 @@ def transform_data_cmd(
     import transform_data
     while True:
         missing_c, missing_t = transform_data.generate_final_summary()
+        transform_data.generate_intake_summary()
         if not missing_c and not missing_t:
             typer.echo("Transformation complete (all IDs mapped).")
             return

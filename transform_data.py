@@ -13,6 +13,8 @@ except Exception:
 MONTHLY_PATH  = BASE_DIR / "monthly_app_summary.xlsx"
 SETTINGS_PATH = BASE_DIR / "Settings.xlsx"
 FINAL_PATH    = BASE_DIR / "monthly_final_summary.xlsx"
+INTAKE_PATH       = BASE_DIR / "monthly_intake_summary.xlsx"
+INTAKE_FINAL_PATH = BASE_DIR / "intake_final_summary.xlsx"
 # ─────────────────────────────────────────────────────────────────────────────
 
 def generate_final_summary() -> Tuple[List[int], List[int]]:
@@ -110,5 +112,39 @@ def generate_final_summary() -> Tuple[List[int], List[int]]:
     
     return missing_countries, missing_tags
 
+
+
+def generate_intake_summary() -> bool:
+    """
+    Map the intake extract (fetch_data: monthly_intake_summary.xlsx) to Country Grouped / Name of
+    Region with the same Settings.xlsx mappings as the monthly summary. Descriptive use only
+    (which intake each month's applications target). Returns False if the extract is absent.
+    """
+    if not INTAKE_PATH.exists():
+        print(f"ℹ️  No intake extract at {INTAKE_PATH} (run fetch-data) — skipping intake summary.")
+        return False
+    df = pd.read_excel(INTAKE_PATH, dtype={"ReportMonth": str, "Intake": str, "InYear": str})
+    df = df.rename(columns={"ReportMonth": "Month"})
+    df["CountryId"] = pd.to_numeric(df["CountryId"], errors="coerce").astype("Int64")
+    df["TagGroupID"] = pd.to_numeric(df["TagGroupID"], errors="coerce").astype("Int64")
+    for c in ("ReceivedApps", "SubmittedApps"):
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+    countries = pd.read_excel(SETTINGS_PATH, sheet_name="Country", dtype={"CountryId": int})
+    regions = pd.read_excel(SETTINGS_PATH, sheet_name="Region").melt(
+        id_vars=["id"], var_name="Country Grouped", value_name="RegionName").rename(columns={"id": "TagGroupID"})
+    df = df.merge(countries[["CountryId", "Country Grouped"]], on="CountryId", how="left")
+    df["Country Grouped"] = df["Country Grouped"].fillna("Other")
+    df = df.merge(regions[["TagGroupID", "Country Grouped", "RegionName"]], on=["TagGroupID", "Country Grouped"],
+                  how="left")
+    df["RegionName"] = df["RegionName"].fillna("Other")
+    out = (df.groupby(["Month", "Country Grouped", "RegionName", "Intake", "InYear"], as_index=False, dropna=False)
+             [["ReceivedApps", "SubmittedApps"]].sum()
+             .rename(columns={"RegionName": "Name of Region"}))
+    out.to_excel(INTAKE_FINAL_PATH, index=False)
+    print(f"✅ Intake summary written to {INTAKE_FINAL_PATH} ({len(out)} rows)")
+    return True
+
+
 if __name__ == "__main__":
     generate_final_summary()
+    generate_intake_summary()

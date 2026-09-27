@@ -20,10 +20,14 @@ import numpy as np
 import pandas as pd
 
 from .. import __version__
-from ..config import CODE_ROOT, RAW_FILE, SETTINGS_FILE, Settings
+from ..config import CODE_ROOT, INTAKE_FILE, RAW_FILE, SETTINGS_FILE, Settings
 from ..data.prepare import METRICS, ORG, TOTAL, Panel, build_panel, load_raw, node_id
 from ..governance import manifest as mf
 from ..governance import tracking
+from ..analysis import seasonality as seas
+from ..analysis import signals as sig
+from ..analysis import intake as itk
+from . import bias_correction as bc
 from . import guardrails as gr
 from . import intervals as iv
 from . import overlay as ov
@@ -61,6 +65,19 @@ class RunResult:
     catalogue: pd.DataFrame
     failures: pd.DataFrame
     track_scorecard: pd.DataFrame
+    bias_test: pd.DataFrame
+    bias_estimates: pd.DataFrame
+    reconciliation_test: pd.DataFrame
+    seasonal_index: pd.DataFrame
+    seasonal_by_year: pd.DataFrame
+    staffing: pd.DataFrame
+    forecast_vs_actual: pd.DataFrame
+    fva_summary: pd.DataFrame
+    human_scores: pd.DataFrame
+    events: pd.DataFrame
+    intake_arrivals: pd.DataFrame
+    intake_lead_profile: pd.DataFrame
+    intake_month_mix: pd.DataFrame
     manifest: dict
 
 
@@ -84,8 +101,22 @@ ARTEFACTS = {
     "catalogue": "Evaluation/model_catalogue.csv",
     "failures": "Evaluation/model_failures.csv",
     "track_scorecard": "Evaluation/track_record_scorecard.csv",
+    "bias_test": "Evaluation/statistical_overlay_test.csv",
+    "bias_estimates": "Evaluation/statistical_overlay_estimates.csv",
+    "reconciliation_test": "Evaluation/reconciliation_test.csv",
+    "seasonal_index": "Analysis/seasonal_index.csv",
+    "seasonal_by_year": "Analysis/seasonal_by_year.csv",
+    "staffing": "Analysis/staffing_calendar.csv",
+    "forecast_vs_actual": "Evaluation/forecast_vs_actual.csv",
+    "fva_summary": "Evaluation/forecast_vs_actual_summary.csv",
+    "human_scores": "Analysis/human_input_scores.csv",
+    "events": "Analysis/policy_event_impacts.csv",
+    "intake_arrivals": "Analysis/intake_arrivals.csv",
+    "intake_lead_profile": "Analysis/intake_lead_profile.csv",
+    "intake_month_mix": "Analysis/intake_month_mix.csv",
 }
-DATE_COLS = ("Date", "Start", "First_Month", "Last_Active_Month", "Period_Start", "From", "To")
+DATE_COLS = ("Date", "Start", "First_Month", "Last_Active_Month", "Period_Start", "From", "To",
+             "Target_Month", "Made_At", "Start_Month", "Intake_Start")
 
 
 def label(level: str, country: str, region: str) -> str:
@@ -99,7 +130,8 @@ def label(level: str, country: str, region: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Path = RAW_FILE,
                  settings_file: Path = SETTINGS_FILE, history_path: Optional[Path] = None,
-                 raw: Optional[pd.DataFrame] = None) -> RunResult:
+                 raw: Optional[pd.DataFrame] = None, intake_file: Optional[Path] = INTAKE_FILE,
+                 intake_raw: Optional[pd.DataFrame] = None) -> RunResult:
     timings: Dict[str, float] = {}
     t0 = time.perf_counter()
 
@@ -137,7 +169,8 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
     honest = sel.honest_evaluation(bt.preds, B, sc.top_k, sc.must_beat_benchmark, sc.honest_eval_origins, sc.policy)
     policy_cmp = sel.policy_comparison(honest, nodes)
     selection = selection.merge(sel.honest_summary(honest), on="node_id", how="left")
-    default_method = "Average of all models" if sc.policy == "mean_all" else "Top-k combination"
+    default_method = {"mean_all": "Average of all models",
+                      "mean_screened": "Average of models beating the benchmark"}.get(sc.policy, "Top-k combination")
     selection["Method"] = np.where(selection["Selected_Models"] == B, "Benchmark (no model beat it)", default_method)
     fb = ((selection["Honest_N"] >= sel.MIN_KNOWN_PAIRS)
           & (selection["Honest_Skill_vs_Benchmark"] < settings.selection.fallback_if_skill_below)
@@ -153,6 +186,26 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
     selected = selection.set_index("node_id")["Selected_Models"]
     base = sel.combine(bt.final, selected)
     comb_bt = sel.combine(bt.preds, selected)
+
+    # statistical overlay: recent-bias correction, adopted only if it wins walk-forward
+    bcfg = settings.bias_correction
+    bias_test, variants = bc.walk_forward_test(comb_bt, honest, bcfg.window, bcfg.max_h)
+    bias_mode = bc.decide(bias_test, bcfg.min_gain_pct) if bcfg.enabled else "none"
+    bias_est = bc.estimate(comb_bt, T - 1, bcfg.window, bcfg.max_h)
+    bias_est["Mode_Adopted"] = bias_mode
+    if bias_mode != "none":
+        corr = base["node_id"].map(bias_est.set_index("node_id")["Correction_Log"]).fillna(0.0).to_numpy()
+        base["Pred"] = base["Pred"].to_numpy() * bc.factor(corr, base["h"].to_numpy(), bias_mode)
+        honest = honest.assign(Policy=variants[bias_mode])
+        mult = bias_est.set_index("node_id")["Correction_Log"].map(np.exp)
+        for nid, mlt in mult.items():
+            if abs(mlt - 1) >= 0.005:
+                m = selection["node_id"] == nid
+                selection.loc[m, "Selection_Reason"] += (
+                    f" Statistical overlay ({bias_mode}): recent actuals vs forecasts imply x{mlt:.3f} "
+                    f"(shrunk estimate from the last {bcfg.window} realised months).")
+    selection["Statistical_Overlay"] = selection["node_id"].map(
+        bias_est.set_index("node_id")["Correction_Log"].map(np.exp) if bias_mode != "none" else {}).fillna(1.0)
     refs = pd.DataFrame({nid: gr.references(panel.y[nid]) for nid in tour["node_id"]}).T
     guards = gr.plausibility(base, refs, settings.guardrails.min_ratio, settings.guardrails.max_ratio)
     for _, g in guards[guards["Guardrail_Triggered"]].iterrows():
@@ -187,6 +240,17 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
         base = pd.concat([base, *em_rows], ignore_index=True)
         selection = pd.concat([selection, pd.DataFrame(em_sel)], ignore_index=True)
     lap("forecast")
+
+    # reconciliation method: replayed walk-forward, chosen on evidence ("auto") — and from here on the
+    # walk-forward forecasts are the reconciled ones, i.e. exactly the procedure that is published
+    recon_test, recon_detail = rc.walk_forward_test(honest, comb_bt, nodes, return_detail=True)
+    recon_method = (rc.choose_method(recon_test) if settings.reconciliation_method == "auto"
+                    else settings.reconciliation_method)
+    if len(recon_detail) and recon_method in set(recon_detail["Method"]):
+        rd = recon_detail[recon_detail["Method"] == recon_method][["node_id", "o", "h", "Pred"]]
+        honest = honest.merge(rd, on=["node_id", "o", "h"], how="left")
+        honest["Policy"] = honest["Pred"].fillna(honest["Policy"])
+        honest = honest.drop(columns="Pred")
 
     # 5) intervals ──────────────────────────────────────────────────────────
     q, pooled = iv.residual_quantiles(comb_bt, tour, levels, settings.intervals.min_obs, H)
@@ -225,7 +289,7 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
         Y = piv.loc[all_ids].to_numpy()
         var = rc.node_variances(all_ids, resid_h1, level_hint)
         E = resid_h1.pivot_table(index="o", columns="node_id", values="e").reindex(columns=all_ids).to_numpy()
-        Yt, used = rc.reconcile(Y, S, settings.reconciliation_method, var=var, E=E)
+        Yt, used = rc.reconcile(Y, S, recon_method, var=var, E=E)
         recon_used[metric] = used
         for i, nid in enumerate(all_ids):
             rec_parts.append(pd.DataFrame({"node_id": nid, "h": np.arange(1, H + 1),
@@ -261,6 +325,17 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
     rules = ov.validate(rules_raw)
     fc = _apply_overlay(fc, rules, levels)
     fc["Label"] = [label(l, c, r) for l, c, r in zip(fc["Level"], fc["Country"], fc["Region"])]
+
+    # human inputs: shown next to the model, blended only for proven forecasters
+    hist_dir = history_path.parent if history_path else out_dir.parent
+    hi_raw, human_source = sig.load_sheet(settings_file, "Human_Inputs", CODE_ROOT / "config" / "human_inputs_template.csv",
+                                          sig.HUMAN_COLS)
+    hi = sig.clean_human(hi_raw, today=pd.Timestamp(run_date))
+    human_hist = sig.record_human(hi, run_date, hist_dir / "human_inputs_history.parquet")
+    model_hist_path = history_path or (out_dir.parent / HISTORY_FILE)
+    model_hist = pd.read_parquet(model_hist_path) if model_hist_path.exists() else pd.DataFrame()
+    human_scores = sig.score_humans(human_hist, panel.history, model_hist)
+    fc = sig.attach_human(fc, hi, human_scores)
     fc = fc.sort_values(["Metric", "Level", "Country", "Region", "Date"], key=_level_sort).reset_index(drop=True)
 
     invariants = gr.check_invariants(fc, last_actual, levels)
@@ -271,6 +346,15 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
     totals = _totals(fc, bq, panel.history, levels)
     periods = _periods(fc, panel.history, settings.data.fin_year_start_month)
     accuracy = sel.accuracy_by_horizon(honest, bt.preds, nodes)
+    scfg = settings.seasonality
+    sidx, syear = seas.seasonal_indices(panel.history, scfg.high_threshold, scfg.low_threshold, scfg.years)
+    staffing = seas.staffing_calendar(fc, sidx, scfg.high_threshold, scfg.low_threshold, scfg.apps_per_fte_month)
+    ev_raw, events_source = sig.load_sheet(settings_file, "Policy_Events",
+                                           CODE_ROOT / "config" / "policy_events_template.csv", sig.EVENT_COLS)
+    events = sig.measure_events(ev_raw, panel.history)
+    intake_df = (itk.clean_intake(intake_raw, settings.data.drop_regions) if intake_raw is not None
+                 else itk.load_intake(intake_file, settings.data.drop_regions) if intake_file else pd.DataFrame())
+    i_arr, i_lead, i_mix, i_known = itk.intake_views(intake_df, last_actual)
     lap("summaries")
 
     # 10) governance ────────────────────────────────────────────────────────
@@ -280,7 +364,11 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
     out_cols = ["Level", "Country", "Region", "Metric", "Date", "Horizon", "Forecast",
                 "Lo80", "Hi80", "Lo95", "Hi95", "Method"]
     tracking.log_run(fc[out_cols], run_id, run_date, __version__, last_actual, history_path)
-    _, track_sc = tracking.track_record(panel.history, history_path)
+    live_joined, track_sc = tracking.track_record(panel.history, history_path)
+    if live_joined is not None and len(live_joined):
+        live_joined = live_joined[pd.to_datetime(live_joined["Run_Date"]) != pd.Timestamp(run_date)]
+    fva = sig.forecast_vs_actual(honest, nodes, months_ext, live_joined)
+    fva_sum = sig.fva_summary(fva)
     catalogue = pd.DataFrame(model_catalogue(settings.models.enabled))
     catalogue = catalogue.merge(_model_usage(selection, scores), on="Model", how="left")
 
@@ -293,6 +381,7 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
                  "series_by_status": panel.series_status["Status"].value_counts().to_dict()},
         "config": settings.as_dict(),
         "reconciliation_method_used": recon_used,
+        "reconciliation_method_chosen": recon_method,
         "overlay_source": overlay_source,
         "overlay_rules_applied": int((rules["Applied_Status"] == "Applied").sum()),
         "guardrails_triggered": int(guards["Guardrail_Triggered"].sum()),
@@ -300,13 +389,22 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
         "invariants": invariants, "coherence_max_gap": coherence,
         "timings_seconds": timings,
         "prediction_history": str(history_path),
+        "statistical_overlay_mode": bias_mode,
+        "human_inputs_source": human_source, "human_inputs_rows": int(len(hi)),
+        "policy_events_source": events_source,
+        "intake_extract": (str(intake_file) if intake_df is not None and len(intake_df) else "not available"),
+        "intake_known_share": i_known,
     })
 
     res = RunResult(out_dir=out_dir, run_id=run_id, run_date=run_date, last_actual=last_actual,
                     forecast=fc, totals=totals, periods=periods, history=panel.history, nodes=nodes,
                     series_status=panel.series_status, dq=panel.dq, scores=scores, selection=selection,
                     accuracy=accuracy, policy_comparison=policy_cmp, calibration=calib, block_calibration=block_calib, guardrails=guards, overlay_rules=rules,
-                    catalogue=catalogue, failures=bt.failures, track_scorecard=track_sc, manifest=manifest)
+                    catalogue=catalogue, failures=bt.failures, track_scorecard=track_sc,
+                    bias_test=bias_test, bias_estimates=bias_est, reconciliation_test=recon_test, seasonal_index=sidx, seasonal_by_year=syear,
+                    staffing=staffing, forecast_vs_actual=fva, fva_summary=fva_sum, human_scores=human_scores,
+                    events=events, intake_arrivals=i_arr, intake_lead_profile=i_lead, intake_month_mix=i_mix,
+                    manifest=manifest)
     save_result(res, bt.preds, honest)
     lap("save")
     return res
