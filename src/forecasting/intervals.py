@@ -12,7 +12,9 @@ Monthly intervals
        delta_lo = Q_{1-a}(q_lo - r),   delta_hi = Q_{1-a}(r - q_hi),   a = (1-L)/2
    per metric x level x horizon band (fallback metric x level). Offsets are added to the
    full-sample quantiles. Additive offsets handle bias flips (a tail that had collapsed to
-   the point can still widen) — multiplicative scaling cannot.
+   the point can still widen) — multiplicative scaling cannot. Offsets never narrow a tail
+   (clipped at 0): the walk-forward window is one regime, and regimes flip; any resulting
+   over-coverage is reported in the calibration table.
 
 Totals over the next 3/6/12 months (monthly quantiles are not additive)
    Location-scale pooling: z = block log error / series' monthly error scale, pooled over
@@ -78,7 +80,9 @@ def _conformal_offsets(q_lo: np.ndarray, q_hi: np.ndarray, r: np.ndarray, level:
     p = min(1.0, np.ceil((n + 1) * (1 - a)) / n)
     d_lo = float(np.quantile(q_lo - r, p))
     d_hi = float(np.quantile(r - q_hi, p))
-    return float(np.clip(d_lo, -cap, cap)), float(np.clip(d_hi, -cap, cap))
+    # widen only: a tail that happened not to be missed during the last 12 months (one regime)
+    # is not narrowed below its full-history width — regimes flip (2025 dip -> 2026 surge)
+    return float(np.clip(d_lo, 0.0, cap)), float(np.clip(d_hi, 0.0, cap))
 
 
 def residual_quantiles(comb: pd.DataFrame, nodes: pd.DataFrame, levels: Sequence[int],

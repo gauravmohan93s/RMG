@@ -43,7 +43,7 @@ def test_conformal_calibration_reaches_nominal_coverage():
     _, cal = iv.calibrate(q, hz, nodes, LEVELS, max_offset=1.5)
     rows = _band_rows(cal)
     assert (rows["Coverage_After_Pct"] >= 80).all() and (rows["Coverage_Before_Pct"] < 80).all()
-    assert (rows["Offset_Hi"] > 0).all() and (rows["Offset_Lo"] > 0).all()
+    assert (rows["Offset_Hi"] > 0).all() and (rows["Offset_Lo"] >= 0).all()
 
 
 def test_conformal_widens_a_collapsed_tail_after_a_bias_flip():

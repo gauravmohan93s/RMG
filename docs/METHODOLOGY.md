@@ -75,12 +75,15 @@ bottom values are set to 0 and re-aggregated, so outputs are coherent and non-ne
 - **Monthly**: quantiles of relative (log1p) errors of the combined forecast from the
   backtest, per series and horizon (window h±1; pooled by metric/level if < 8 errors),
   forced to contain the point and to widen with horizon.
-- **Calibration**: the smallest factor c ≥ 1 that makes walk-forward coverage reach 80%/95%
-  is applied per metric/level (split-conformal style). Coverage before/after is reported.
+- **Calibration (split-conformal / CQR)**: quantiles are re-fitted on errors realised before the
+  walk-forward window; on the walk-forward errors (never used for fitting) each tail receives an
+  additive log-scale offset so it is missed at most (1-L)/2 of the time, per metric × level ×
+  horizon band. Offsets only widen (never narrow) a tail. Coverage before/after is reported.
 - **3/6/12-month totals** (monthly quantiles are not additive): location-scale pooling —
   each series' own monthly error scale × the pooled distribution of standardised block
-  errors of all series of the metric. One series has too few 12-month windows to
-  estimate its own range; series differ in volatility, so raw pooling is also wrong.
+  errors of all series of the metric, then conformally calibrated in the same way. One series has
+  too few 12-month windows to estimate its own range; series differ in volatility, so raw pooling
+  is also wrong.
 
 ## 8. Emerging series
 Recent 6-month deseasonalised level × the seasonal index of the parent (country if it is

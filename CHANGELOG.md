@@ -3,6 +3,19 @@
 All notable changes are recorded here. Format: [Keep a Changelog](https://keepachangelog.com/);
 versioning: [SemVer](https://semver.org/) as defined in `docs/ROADMAP.md`.
 
+## [2.0.1] — 2026-09-27
+
+### Fixed
+- Interval calibration was tested on errors that had also been used to build the intervals
+  (found in independent code review). Now split-conformal (CQR): quantiles for the check are fitted
+  only on errors realised before the walk-forward window; per-tail additive offsets are applied.
+  Out-of-sample 80% coverage moved from 53–91% (before) to 80–88% (after).
+- Calibration only widens a tail, never narrows it (one 12-month regime is not enough to remove
+  downside risk).
+- 3/6/12-month total ranges calibrated the same way (standardised units).
+- Fiscal-period "actual to date" treats missing months as unknown instead of 0.
+- Complete-block check requires horizons exactly 1..k.
+
 ## [2.0.0] — 2026-09-27
 
 Complete rebuild of the forecasting engine after the v1 review (`docs/REVIEW_2026-09-27.md`).
