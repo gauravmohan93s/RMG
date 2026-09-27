@@ -1,0 +1,5 @@
+Country,Region,Metric,Multiplier,Valid_From,Valid_To,Owner,Rationale,Source,Status,Approved_On
+Canada,*,*,0.85,2026-10,2027-09,,IRCC study permit caps and PGWP tightening (v1 default - needs owner review),,Draft,
+Australia,*,*,0.90,2026-10,2027-09,,Visa fee increases and Genuine Student scrutiny (v1 default - needs owner review),,Draft,
+United Kingdom,*,*,0.95,2026-10,2027-09,,Dependant restrictions partly offset by Graduate Route (v1 default - needs owner review),,Draft,
+United States of America,*,*,1.05,2026-10,2027-09,,STEM OPT demand (v1 default - needs owner review),,Draft,

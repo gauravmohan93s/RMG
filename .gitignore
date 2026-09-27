@@ -53,12 +53,13 @@ pipeline.log
 *.log
 
 # Output/Artifacts - should NOT be committed
-outputs/
-predictions/
-reports/
+/outputs/
+/predictions/
+/reports/
 models/checkpoints/
 *.xlsx
 *.csv
+!config/*.csv
 data/raw/
 data/processed/
 
