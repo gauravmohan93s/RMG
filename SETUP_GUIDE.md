@@ -117,178 +117,113 @@ Update `.env` with your folder structure:
 # Where monthly raw data will be fetched
 RMG_DATA_ROOT=C:\Users\YourName\RMG\RMG Calculations
 
-# Where pipeline outputs (forecasts, reports) will be saved
-RMG_OUT_DIR=C:\Users\YourName\RMG\RMG Calculations\Predictions
+# Optional: write one run somewhere else (default: {RMG_DATA_ROOT}\Predictions\<run-date>)
+# RMG_OUT_DIR=C:\temp\rmg_test_run
 ```
 
 ### Directory Structure
 ```
 RMG Calculations/
-├── Settings.xlsx                 # Your mappings (must exist)
-├── monthly_app_summary.xlsx      # Created by fetch-data
-├── monthly_final_summary.xlsx    # Created by transform-data
+├── Settings.xlsx                    # Your mappings (+ optional Policy_Overlay sheet)
+├── monthly_app_summary.xlsx         # Created by fetch-data
+├── monthly_final_summary.xlsx       # Created by transform-data (pipeline input)
 │
 └── Predictions/
-    ├── 2025-01-20/              # Run date folder (created automatically)
-    │   ├── final_forecast.parquet
-    │   ├── series_selection.csv
-    │   ├── reports/
-    │   │   └── *.pdf
-    │   └── model_outputs/
-    │       ├── model01_lastyear.parquet
-    │       ├── model05_prophet.parquet
-    │       └── ...
-    │
-    └── 2025-01-21/              # Next run
-        └── ...
+    ├── prediction_history_v2.parquet   # every forecast issued (track record)
+    └── 2026-09-27/                     # one folder per run date
+        ├── Reports/                    # executive PDF brief + Excel workbook
+        ├── Final_Forecast/             # final_forecast.csv, totals, fiscal periods
+        ├── Evaluation/                 # backtests, scores, selection evidence
+        ├── Data/                       # series status, data quality
+        ├── run_manifest.json
+        └── pipeline.log
 ```
 
 ## 5️⃣ Configure Forecasting Parameters
 
-Update `.env` for your forecast needs:
+All modelling settings live in **`config/pipeline.toml`** (version-controlled; every value is
+copied into each run's `run_manifest.json`). The defaults are the validated production settings:
 
-```env
-# How many months to forecast into the future
-FORECAST_HORIZON=12
+| Setting | Default | Meaning |
+|---|---|---|
+| `backtest.horizon` | 12 | months forecast **and** evaluated |
+| `backtest.n_origins` | 24 | rolling forecast origins used to test every model (must be ≥ horizon) |
+| `models.enabled` | 7 models | candidates in the tournament |
+| `selection.policy` | `mean_all` | equal-weight average of all models (won the walk-forward comparison) |
+| `intervals.levels` | 80, 95 | prediction-interval coverage targets |
+| `reconciliation.method` | `wls_var` | how regions/countries/organisation are made to add up |
+| `guardrails.min_ratio / max_ratio` | 0.5 / 1.8 | plausibility range for a 12-month total |
 
-# Random seed for reproducibility (keep same for consistent results)
-RANDOM_SEED=42
+Changing any of these changes the numbers: record it in `CHANGELOG.md` and bump the version.
+Environment overrides: `RMG_DATA_ROOT` (data folder), `RMG_OUT_DIR` (run folder), `RMG_CONFIG` (alternative TOML).
 
-# Data fetch parameters
-FETCH_START_DATE=2020-01-01      # Historical data start
-FETCH_END_DATE=                  # Leave empty for yesterday
-```
+## 6️⃣ Business / Policy Adjustments (optional)
 
-## 6️⃣ (Optional) Setup LLM Report Commentary
+Add a sheet **`Policy_Overlay`** to `Settings.xlsx` with the columns of
+`config/policy_overlay_template.csv`:
+`Country, Region (* = all), Metric (* = both), Multiplier, Valid_From (YYYY-MM), Valid_To, Owner, Rationale, Source, Status, Approved_On`.
 
-If you want AI-generated commentary in PDF reports, install Ollama:
-
-### Install Ollama
-1. Download from https://ollama.ai
-2. Install and run
-
-### Pull a Small Model
-```bash
-ollama pull phi3:mini
-# or
-ollama pull qwen2:0.5b
-```
-
-### Configure in `.env`
-```env
-OLLAMA_HOST=http://localhost:11434
-OLLAMA_MODEL=phi3:mini
-OLLAMA_NUM_CTX=512
-```
-
-### Start Ollama
-```bash
-ollama serve
-```
-
-**Note**: If Ollama is not available, reports will be generated without LLM commentary (graceful fallback).
+Only rows with `Status = Approved`, an `Owner`, an `Approved_On` date and a multiplier between
+0.5 and 1.5 are applied — and only inside their validity window. The statistical baseline is
+always kept; adjusted figures appear in separate `Adjusted` columns.
 
 ## 7️⃣ Verify Setup
 
-### Run a Quick Test
 ```bash
-# Test data loader
-python run_pipeline.py load-data
-
-# Expected output:
-# ▶️  Testing data loader …
-# loaded PREPARED table – X,XXX rows
-# found artefacts: [...]
-# ✅  Loader OK
-```
-
-### Check Log Output
-```bash
-# View pipeline log
-tail -f pipeline.log
+python run_pipeline.py version        # prints the pipeline version
+python -m pytest                      # 39 tests: leakage, intervals, reconciliation, overlay, end-to-end
 ```
 
 ## 8️⃣ Run the Full Pipeline
 
-### First Full Run
-```bash
-# Run for today
-python run_pipeline.py all
+Run once a month **after the 25th** (the reporting cycle closes on the 25th):
 
-# Or specify a date
-python run_pipeline.py all --run-date 2025-01-20
+```bash
+python run_pipeline.py all                     # fetch -> transform -> forecast -> report
+python run_pipeline.py all --skip-fetch        # reuse the current extract
+python run_pipeline.py forecast --run-date 2026-09-27
+python run_pipeline.py report   --run-date 2026-09-27   # rebuild reports from a saved run
 ```
 
-### Expected Output Sequence
-1. **Fetch data** from SQL Server (skips if no new months)
-2. **Transform** to aggregated summary
-3. **EDA** explores the data
-4. **Load data** and validate
-5. **Run models** (9 forecasting models)
-6. **Evaluate** model performance
-7. **Forecast** using best models
-8. **Report** generates PDF files
+A run takes about 5 minutes (the rolling-origin backtest is the long step).
 
-### Check Results
-```bash
-# List output files
-ls -la "C:\path\to\RMG Calculations\Predictions\2025-01-20"
-
-# View forecasts
-# → monthly_final_summary.xlsx
-# → reports/*.pdf
-```
+### Outputs (`Predictions/<run-date>/`)
+| Path | Contents |
+|---|---|
+| `Reports/RMG_Executive_Brief_<date>.pdf` | 3-page brief + country appendix |
+| `Reports/RMG_Forecast_<date>.xlsx` | planning sheets + all evidence sheets |
+| `Final_Forecast/final_forecast.csv` | every region, country and organisation × month, with 80/95% ranges |
+| `Final_Forecast/totals_summary.csv`, `period_summary.csv` | next 3/6/12-month totals, fiscal quarters/years |
+| `Evaluation/*` | backtest predictions, model scores, selection evidence, policy comparison, calibration |
+| `Data/*` | series status, data-quality register, history used |
+| `run_manifest.json` | version, git commit, data SHA-256, config, timings |
+| `../prediction_history_v2.parquet` | every forecast ever issued (feeds the Track Record sheet) |
 
 ## 9️⃣ Handling Unmapped Items
 
-If you see warnings about unmapped CountryIDs or TagGroupIDs:
-
-```
-⚠️  Unmapped items detected (auto-grouped as 'Other'):
-   Missing CountryIDs: [4, 7, 12]
-   Missing TagGroupIDs: [15, 22]
-```
-
-### To Fix
-1. Open `Settings.xlsx`
-2. Add the missing IDs to appropriate sheets
-3. Re-run the pipeline (it will use your mappings)
-
-```bash
-python run_pipeline.py all --skip-fetch
-```
+If you see warnings about unmapped CountryIDs or TagGroupIDs, add them to `Settings.xlsx`
+(Country / Region sheets) and re-run with `--skip-fetch`. Until then they are grouped as
+"Other" and listed in the **Data Quality** sheet.
 
 ## 🔟 Automate with Task Scheduler (Windows)
 
-### Create Batch File
 Save as `run_forecast.bat`:
 ```batch
 @echo off
-cd C:\path\to\RMG
-call venv\Scripts\activate.bat
-python run_pipeline.py all --skip-fetch
-pause
+cd /d "C:\path\to\rmg_forecast_repo"
+call .venv_3.12\Scripts\activate.bat
+python run_pipeline.py all
 ```
-
-### Schedule Daily Run
-1. Open Task Scheduler
-2. Create Basic Task
-3. Set trigger to daily at desired time
-4. Set action to run `run_forecast.bat`
-5. Configure task settings:
-   - Run whether user is logged in or not
-   - Run with highest privileges
-
-### Or with Cron (Linux/macOS)
-```bash
-# Edit crontab
-crontab -e
-
-# Add line (runs at 2 AM daily)
-0 2 * * * cd /home/user/RMG && /home/user/RMG/venv/bin/python run_pipeline.py all --skip-fetch >> pipeline_cron.log 2>&1
-```
+Schedule it monthly (e.g. the 27th, 07:00) in Task Scheduler.
 
 ## 🛑 Troubleshooting
+
+### ❌ `backtest.n_origins must be >= backtest.horizon`
+Every forecast horizon must be tested. Keep `n_origins` ≥ `horizon` in `config/pipeline.toml`.
+
+### ❌ `Forecast invariants violated`
+The run stops rather than publish inconsistent numbers (e.g. a point outside its range).
+Check `pipeline.log` in the run folder and open an issue with the run manifest attached.
 
 ### ❌ Database Connection Error
 ```
@@ -308,20 +243,6 @@ FileNotFoundError: [Errno 2] No such file or directory: '.../Settings.xlsx'
 - Create `Settings.xlsx` in `RMG_DATA_ROOT`
 - Ensure "Country" and "Region" sheets exist
 - Follow the structure in Section 3
-
-### ❌ LSTM or XGBoost Out of Memory
-**Solution**:
-- Skip heavy models: `python run_pipeline.py all --exclude model07_xgboost,model08_lstm`
-- Reduce data: Use fewer historical months by adjusting `FETCH_START_DATE`
-
-### ❌ Ollama Connection Error
-```
-requests.exceptions.ConnectionError: Ollama not available
-```
-**Solution** (optional - not required):
-- Install Ollama: https://ollama.ai
-- Start Ollama: `ollama serve`
-- Or disable: Reports will work without LLM commentary
 
 ### ❌ ODBC Driver Not Found
 ```

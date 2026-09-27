@@ -7,7 +7,7 @@ The version lives in `src/__init__.py` and is stamped into every run manifest,
 the prediction history and the reports. Each release is a git tag `vX.Y.Z`;
 work happens on `release/*` or `feature/*` branches and is recorded in `CHANGELOG.md`.
 
-## v2.0.0 — Production forecasting engine (this release)
+## v2.0.0 — Production forecasting engine (released 2026-09-27)
 
 Goal: numbers an executive can use, with evidence for every choice.
 
@@ -17,8 +17,8 @@ Goal: numbers an executive can use, with evidence for every choice.
 | 2 | Hierarchy: Region → Country → Organisation nodes for Received & Submitted | 2 |
 | 3 | Model registry with versioned, leak-free models: Seasonal Naive, Seasonal Naive × YoY growth, ETS (damped), Theta, SARIMA airline, TSB, Global LightGBM (direct multi-horizon) | 3, 4, 13, 14 |
 | 4 | Rolling-origin backtest: 24 origins × 12-month horizon; models only ever see data ≤ origin | 1, 3, 11 |
-| 5 | Selection: horizon-balanced MAE, must beat seasonal-naive benchmark, equal-weight top-3 combination | 1, 11 |
-| 6 | Honest walk-forward evaluation of the selection policy itself (no selection bias) + benchmark fallback | 3 |
+| 5 | Scoring: horizon-balanced MAE vs seasonal-naive benchmark; policies `mean_all` (default — won the walk-forward comparison, see docs/experiments) and `top_k` | 1, 11 |
+| 6 | Honest walk-forward evaluation of every policy each run (no selection bias) + benchmark fallback | 3 |
 | 7 | Empirical, calibrated prediction intervals (80/95%) per horizon; monthly and 3/6/12-month totals | 2, 14 |
 | 8 | Reconciliation (WLS / MinT-shrink) so regions sum to countries and organisation | 2 |
 | 9 | Guardrails: 12-month plausibility ratio with documented fallback; invariants asserted | 1, 16 |
