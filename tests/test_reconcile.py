@@ -43,3 +43,24 @@ def test_mint_shrink_runs_with_complete_residuals():
     E = np.random.default_rng(0).normal(size=(24, 5))
     yt, used = rc.reconcile(np.array([[330.0], [210.0], [100.0], [90.0], [110.0]]), S, "mint_shrink", E=E)
     assert used == "mint_shrink" and np.isclose(yt[0, 0], yt[2:, 0].sum())
+
+
+def test_walk_forward_reconciliation_test_and_choice():
+    nd = nodes().assign(Metric="Received", Status="Mature")
+    nd["node_id"] = "Received|" + nd["node_id"]
+    rng = np.random.default_rng(0)
+    rows, comb = [], []
+    for o in range(20):
+        truth = {"A1": 100.0, "A2": 90.0, "B1": 110.0}
+        truth["A"] = truth["A1"] + truth["A2"]
+        truth["org"] = truth["A"] + truth["B1"]
+        for k, v in truth.items():
+            noise = 1.25 if k == "org" else rng.normal(1, 0.05)     # the org's own forecast is biased
+            rows.append({"node_id": f"Received|{k}", "o": o, "h": 1, "t": o + 1, "Actual": v, "Policy": v * noise})
+            comb.append({"node_id": f"Received|{k}", "o": o, "h": 1, "t": o + 1, "Actual": v, "Pred": v * noise})
+    honest, comb = pd.DataFrame(rows), pd.DataFrame(comb)
+    test, detail = rc.walk_forward_test(honest[honest["o"] >= 10], comb, nd, return_detail=True)
+    org = test[test["Level"] == "Organisation"].set_index("Method")["WAPE_Pct"]
+    assert org["bottom_up"] < org["none"]
+    assert rc.choose_method(test) in ("bottom_up", "wls_var", "mint_shrink")
+    assert set(detail["Method"]) == set(rc.METHODS)
