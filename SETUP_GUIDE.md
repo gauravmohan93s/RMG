@@ -49,21 +49,10 @@ DB_PASSWORD=your_password
 
 ### Test Database Connection
 ```bash
-python -c "
-import os
-from sqlalchemy import create_engine
-from urllib.parse import quote_plus
-
-os.environ['DB_SERVER'] = os.getenv('DB_SERVER')
-os.environ['DB_USERNAME'] = os.getenv('DB_USERNAME')
-os.environ['DB_PASSWORD'] = os.getenv('DB_PASSWORD')
-os.environ['DB_NAME'] = os.getenv('DB_NAME')
-
-from fetch_data import *
-engine = create_engine(CONNECTION_URL)
-print('✅ Database connection successful!')
-"
+python -c "import fetch_data, sqlalchemy; e = fetch_data.make_engine(); e.connect().close(); print('Database connection OK')"
 ```
+`make_engine()` reads `.env` automatically and stops with a clear message if a setting is missing.
+Credentials are never stored in code.
 
 ## 3️⃣ Prepare Data Mappings
 
@@ -167,11 +156,21 @@ Only rows with `Status = Approved`, an `Owner`, an `Approved_On` date and a mult
 0.5 and 1.5 are applied — and only inside their validity window. The statistical baseline is
 always kept; adjusted figures appear in separate `Adjusted` columns.
 
+### Other optional sheets (v2.1)
+| Sheet in `Settings.xlsx` | Columns | What happens |
+|---|---|---|
+| `Human_Inputs` | Country, Region (blank = country total; Country "Organisation" = whole org), Metric, Month (YYYY-MM), Expected_Volume, Submitted_By, Reason, Submitted_On | Shown next to the model, recorded every run and scored against actuals; blended in only for people with ≥ 6 scored months who beat the model |
+| `Policy_Events` | Country, Metric (* = both), Event, Start_Month (YYYY-MM), Notes | The real impact of each event is measured against a counterfactual forecast, with a placebo significance test |
+
+Templates: `config/human_inputs_template.csv`, `config/policy_events_template.csv`.
+For staffing in FTE, set `seasonality.apps_per_fte_month` in `config/pipeline.toml`
+(e.g. 120 applications per counsellor per month).
+
 ## 7️⃣ Verify Setup
 
 ```bash
 python run_pipeline.py version        # prints the pipeline version
-python -m pytest                      # 39 tests: leakage, intervals, reconciliation, overlay, end-to-end
+python -m pytest                      # 59 tests: leakage, intervals, models, seasonality, overlays, signals, end-to-end
 ```
 
 ## 8️⃣ Run the Full Pipeline
@@ -185,7 +184,7 @@ python run_pipeline.py forecast --run-date 2026-09-27
 python run_pipeline.py report   --run-date 2026-09-27   # rebuild reports from a saved run
 ```
 
-A run takes about 5 minutes (the rolling-origin backtest is the long step).
+A run takes about 20 minutes (the 17-model rolling-origin backtest is the long step).
 
 ### Outputs (`Predictions/<run-date>/`)
 | Path | Contents |

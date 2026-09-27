@@ -1,4 +1,4 @@
-# RMG Application-Flow Forecasting (v2)
+# RMG Application-Flow Forecasting (v2.1)
 
 Monthly 12-month forecast of applications **Received** and **Submitted** for the organisation,
 every destination country and every region — with calibrated ranges, evidence for every
@@ -8,25 +8,29 @@ modelling choice, and executive-ready reports.
 | Output | For |
 |---|---|
 | `Reports/RMG_Executive_Brief_<date>.pdf` | Leadership: headline numbers, ranges, key messages, country outlook, how far to trust it |
-| `Reports/RMG_Forecast_<date>.xlsx` | Planners & analysts: monthly/fiscal detail + 11 evidence sheets |
+| `Reports/RMG_Forecast_<date>.xlsx` | Planners & analysts: forecasts, staffing calendar, seasonality, forecast vs actual, and all evidence sheets |
 | `Final_Forecast/final_forecast.csv` | Downstream systems: every region/country/organisation × month with 80/95% ranges |
 | `run_manifest.json` | Audit: code version, data fingerprint, settings |
 
 ## How it works (one paragraph)
-Seven methods (seasonal naive → ETS, Theta, SARIMA, an intermittent-demand model and a global
-LightGBM) are each re-run as if standing at 24 past month-ends, forecasting the next 12 months
-every time. Ways of combining them are replayed walk-forward with only information available at
-the time; the equal-weight average of all methods won and is used (re-tested every run). Ranges
-come from the errors actually made, calibrated to their stated coverage. Regions, countries and the
-organisation are reconciled so they add up. Full detail: [docs/METHODOLOGY.md](docs/METHODOLOGY.md).
+Seventeen methods — benchmarks, ETS, Theta, SARIMA/AutoARIMA, STL, a Prophet-style model,
+intermittent-demand models, all four v1 month-on-month models (rebuilt leak-free) and three global
+machine-learning models (LightGBM, XGBoost, neural net) — are each re-run as if standing at 24 past
+month-ends, forecasting the next 12 months every time, under identical conditions. Ways of combining
+them are replayed walk-forward with only information available at the time; the equal-weight
+average of all methods won and is used (re-tested every run). A statistical overlay corrects
+recent bias only if that proves itself walk-forward. Ranges come from the errors actually made,
+conformally calibrated. Regions, countries and the organisation are reconciled so they add up.
+Seasonality (High/Medium/Low months), a staffing calendar, forecast-vs-actual history, manager
+inputs and measured policy-event impacts are reported alongside. Full detail: [docs/METHODOLOGY.md](docs/METHODOLOGY.md).
 
 ## Quick start
 ```bash
 python -m venv .venv_3.12
 .venv_3.12\Scripts\activate
 pip install -r requirements-dev.txt
-python -m pytest                          # 39 tests
-python run_pipeline.py all                # fetch -> transform -> forecast -> report (~5 min)
+python -m pytest                          # 59 tests
+python run_pipeline.py all                # fetch -> transform -> forecast -> report (~20 min, 17 models)
 ```
 Other commands: `fetch-data`, `transform-data`, `forecast`, `report`, `version`
 (`--run-date YYYY-MM-DD`, `--skip-fetch`, `--skip-transform`). Setup details, database
@@ -44,6 +48,9 @@ src/forecasting/intervals.py    empirical calibrated intervals
 src/forecasting/reconcile.py    WLS / MinT reconciliation
 src/forecasting/guardrails.py   plausibility bounds, invariants
 src/forecasting/overlay.py      governed business adjustments
+src/forecasting/bias_correction.py  statistical overlay (recent-bias correction, walk-forward tested)
+src/analysis/seasonality.py     seasonal index, High/Medium/Low months, staffing calendar
+src/analysis/signals.py         forecast vs actual, human inputs, measured policy events
 src/forecasting/engine.py       end-to-end run + artefacts
 src/governance/                 run manifest, prediction history, track record
 src/reports/                    Excel workbook, PDF brief, charts, narrative

@@ -3,6 +3,43 @@
 All notable changes are recorded here. Format: [Keep a Changelog](https://keepachangelog.com/);
 versioning: [SemVer](https://semver.org/) as defined in `docs/ROADMAP.md`.
 
+## [2.1.0] — 2026-09-27
+
+Requested improvements: all original models in a fair tournament, statistically derived
+overlays instead of guesses, seasonality for staffing, intake view, prediction record,
+human signals, better charts and a human-friendly workbook.
+
+### Added
+- **Fair 17-model tournament**: all v1 models re-implemented leak-free (LastYear_MoM, AvgMonthly_MoM,
+  YoY_MoM, Rolling_MoM, AutoARIMA, ProphetStyle, Croston, XGBoost, neural net) plus STL_ETS; identical
+  origins, horizons, data and metric for every model. Global ML models use the Received↔Submitted
+  funnel as an internal signal.
+- Policy `mean_screened`; policy comparison now includes all policies.
+- **Statistical overlay**: recent-bias correction with empirical-Bayes shrinkage, adopted only if it
+  wins walk-forward (on 2026-09 data it did not — it would have worsened error 20.2% → 21.2%).
+- **Reconciliation `auto`**: bottom-up / WLS / MinT replayed walk-forward, most accurate used
+  (2026-09: bottom-up; organisation receipts error 11.4% vs 18.2% forecasting the total alone).
+  Walk-forward accuracy, calibration and Forecast vs Actual now use the reconciled (published) numbers.
+- **Seasonality & staffing**: robust-STL seasonal index, High/Medium/Low months, year-by-year stability,
+  12-month staffing calendar with capacity figure and optional FTE.
+- **Measured policy events** with a non-overlapping placebo significance test.
+- **Forecast vs Actual** record (walk-forward vintages + live forecasts) and **human inputs**
+  (recorded, scored on identical months, blended only after beating the model for ≥ 6 months).
+- **Intake extract** (`Intake`, `InYear`) and descriptive intake arrival view (which months each
+  intake's applications arrive in). The forecast itself stays monthly.
+- Reports: labelled seasonal/heatmap/forecast-vs-actual charts, plain-English Excel headers,
+  colour-coded tab groups, native Excel charts, new analysis sheets.
+
+### Changed
+- Backtest runs local and global models in one pool, heaviest first; AutoARIMA re-selects its order
+  every 6 origins (causal) — 17-model run 35 → 17 minutes.
+- `fetch_data.py`: one incremental routine for both extracts; **database credentials only from
+  environment / git-ignored `.env`** (hard-coded defaults removed — rotate the old password).
+
+### Fixed (independent review)
+- Placebo windows no longer overlap; human-vs-model scoring uses identical months; stale human
+  inputs (> 120 days) expire.
+
 ## [2.0.1] — 2026-09-27
 
 ### Fixed

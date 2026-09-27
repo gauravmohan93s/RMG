@@ -29,7 +29,7 @@ Goal: numbers an executive can use, with evidence for every choice.
 | 14 | pytest suite: leakage, intervals, reconciliation, guardrails, overlay, data prep | 18 |
 | 15 | Config in `config/pipeline.toml`; legacy v1 modules removed (recoverable from tag `v1.0.0`) | 12, 15 |
 
-## v2.1.0 — Full fair tournament, seasonality & staffing, statistical overlay, track record (in progress)
+## v2.1.0 — Full fair tournament, seasonality & staffing, statistical overlay, track record (released 2026-09-27)
 Requested 2026-09-27. Every item keeps the v2 rule: identical origins, horizons, data and
 metric for every model; nothing fitted on data after a forecast origin.
 
@@ -44,9 +44,10 @@ metric for every model; nothing fitted on data after a forecast origin.
 | 7 | Human signals: `Human_Inputs` template (expected volumes + reason) recorded every run and scored; combined statistically once ≥6 months of track record exist |
 | 8 | Reports: fully labelled charts (seasonality heatmap, H/M/L profile, forecast vs actual, model league table); human-friendly Excel (plain-English headers, native charts, staffing calendar, grouped tabs) |
 
-## v2.2.0 — Intake-true forecasting and external drivers
-- Add the intake field (e.g. `Intake-In-Year`) to the SQL extract and forecast by target intake;
-  lead-time curves (share of an intake's applications received k months before start).
+## v2.2.0 — External drivers (primary goal: monthly volume accuracy)
+- Intake extract and descriptive arrival view shipped in v2.1 (the forecast stays monthly).
+- Test the intake mix of recent months as a leading signal for the global ML models (keep only if it
+  improves walk-forward accuracy).
 - Leading indicators as regressors (enquiries/leads, counsellor capacity, marketing, visa
   approval rates); each must prove uplift in the rolling-origin harness before use.
 - Scenario engine: overlays as distributions rather than point multipliers.
