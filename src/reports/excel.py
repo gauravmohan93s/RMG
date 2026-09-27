@@ -14,6 +14,48 @@ from ..data.prepare import ORG, TOTAL
 from . import insights as ins
 
 CONF_COLORS = {"High": "#d7f0dd", "Medium": "#fff1c7", "Low": "#fbd9d6"}
+CLASS_FILL = {"High": "#cfe1f7", "Medium": "#f3f6fa", "Low": "#fdf1e3"}
+TAB_COLORS = {"plan": "#2a78d6", "analysis": "#1baf7a", "evidence": "#8a8a85"}
+SHEET_GROUP = {
+    "Read Me": "plan", "Executive Summary": "plan", "Country Outlook": "plan", "Monthly Forecast": "plan",
+    "Fiscal Periods": "plan", "Staffing Calendar": "plan",
+    "Seasonality": "analysis", "Forecast vs Actual": "analysis", "Statistical Overlay": "analysis",
+    "Human Inputs": "analysis", "Policy Events": "analysis", "Intake Profile": "analysis",
+}
+# plain-English column headers (the CSV files keep the technical names)
+FRIENDLY = {
+    "Label": "Series", "Date": "Month", "Horizon": "Months ahead", "Forecast": "Forecast",
+    "Lo80": "Low (80% range)", "Hi80": "High (80% range)", "Lo95": "Low (95% range)", "Hi95": "High (95% range)",
+    "Forecast_Adjusted": "Adjusted forecast", "Adjusted_Lo80": "Adjusted low (80%)", "Adjusted_Hi80": "Adjusted high (80%)",
+    "Overlay_Multiplier": "Business adjustment (x)", "Base_Forecast": "Before reconciliation",
+    "Same_Months_Last_Year": "Same months last year", "YoY_Pct": "vs last year (%)", "Window": "Period",
+    "Actual_To_Date": "Actual to date", "Forecast_Remaining": "Forecast remaining", "Outlook": "Outlook (actual + forecast)",
+    "Outlook_Adjusted": "Adjusted outlook", "Same_Period_Last_Year": "Same period last year",
+    "Months_Actual": "Months actual", "Months_Forecast": "Months forecast", "Period_Start": "Period start",
+    "Selected_Models": "Models used", "Selection_Reason": "Why this method", "Best_Model": "Best single model",
+    "Runner_Up": "Runner-up", "Margin_Best_vs_RunnerUp_Pct": "Best vs runner-up (% better)",
+    "Best_HB_MAE": "Best model error (avg units/month)", "Benchmark_HB_MAE": "Same-month-last-year error",
+    "Honest_WAPE_Policy": "Walk-forward error (method)", "Honest_WAPE_Benchmark": "Walk-forward error (benchmark)",
+    "Honest_Skill_vs_Benchmark": "Skill vs benchmark", "Honest_N": "Walk-forward tests", "N_Candidates": "Models tested",
+    "N_Origins": "Backtest origins", "Required_Train_Months": "Training months required",
+    "Eligible_Models": "Eligible models", "Months_Of_History": "Months of history",
+    "Statistical_Overlay": "Statistical overlay (x)", "HB_MAE": "Avg error (units/month, 1-12 ahead)",
+    "Rel_to_Benchmark": "Error vs benchmark (x)", "WAPE": "WAPE", "Bias_Pct": "Bias (%)",
+    "Seasonal_Index": "Seasonal index (1 = average month)", "Class": "Volume class",
+    "Consistency_Pct": "Same class in % of years", "Month_Name": "Month", "Load_Index": "vs average month (x)",
+    "Workload_Class": "Workload", "Historical_Class": "Usual for this month", "Capacity_Plan_80": "Plan for (80% high)",
+    "Low_80": "Low (80%)", "FTE_Base": "FTE (forecast)", "FTE_Capacity_80": "FTE (80% high)",
+    "Target_Month": "Month", "Made_At": "Forecast made at", "Months_Ahead": "Months ahead",
+    "Error_Pct": "Error (%)", "Human_Expected": "Manager expectation", "Human_vs_Model_Pct": "Manager vs model (%)",
+    "Forecast_Human_Blend": "Blended (proven managers only)", "Human_Submitted_By": "Submitted by",
+    "Human_Reason": "Manager reason", "Measured_Impact_Pct": "Measured impact (%)",
+    "Normal_Error_Range_80_Pct": "Normal forecast error range (80%)", "Coverage_Before_Pct": "Coverage before (%)",
+    "Coverage_After_Pct": "Coverage after (%)", "Target_Pct": "Target (%)", "WAPE_Pct": "Error WAPE (%)",
+}
+
+
+def _hdr(c: str) -> str:
+    return FRIENDLY.get(c, str(c).replace("_", " "))
 
 
 def _friendly(df: pd.DataFrame) -> pd.DataFrame:
@@ -54,17 +96,26 @@ class _Book:
         if note:
             ws.write(start_row, 0, note, self.f["muted"])
         for j, c in enumerate(df.columns):
-            ws.write(r0, j, c, self.f["hdr"])
+            ws.write(r0, j, _hdr(c), self.f["hdr"])
             fmt = self.f.get((formats or {}).get(c, ""), None)
             if fmt is None:
                 if pd.api.types.is_datetime64_any_dtype(df[c]):
                     fmt = self.f["month"]
                 elif pd.api.types.is_float_dtype(df[c]):
                     fmt = self.f["int"]
-            ws.set_column(j, j, (widths or {}).get(c, max(10, min(40, len(str(c)) + 2))), fmt)
+            ws.set_column(j, j, (widths or {}).get(c, max(11, min(40, len(_hdr(c)) + 2))), fmt)
         ws.freeze_panes(r0 + 1, 0)
         if len(df):
             ws.autofilter(r0, 0, r0 + len(df), len(df.columns) - 1)
+        grp = SHEET_GROUP.get(name, "evidence")
+        ws.set_tab_color(TAB_COLORS[grp])
+        for cc in ("Class", "Workload_Class", "Historical_Class"):
+            if cc in df.columns and len(df):
+                j = list(df.columns).index(cc)
+                for k, colr in CLASS_FILL.items():
+                    ws.conditional_format(r0 + 1, j, r0 + len(df), j, {
+                        "type": "cell", "criteria": "==", "value": f'"{k}"',
+                        "format": self.w.book.add_format({"bg_color": colr})})
         if conf_col and conf_col in df.columns:
             j = list(df.columns).index(conf_col)
             for k in CONF_COLORS:
@@ -102,8 +153,9 @@ def write_workbook(res, path: Path) -> Path:
                                    "sheet); the equal-weight average of all methods won and is used. A series falls back to "
                                    "'same month last year' if the average did not beat it (Model Evidence sheet)."),
         ("Sheets", "Executive Summary · Country Outlook · Monthly Forecast · Fiscal Periods (for planning) — "
-                   "Model Evidence · Model Scores · Accuracy by Horizon · Policy Comparison · Interval Calibration · "
-                   "Model Catalogue · "
+                   "Staffing Calendar · Seasonality · Forecast vs Actual · Statistical Overlay · Human Inputs · "
+                   "Policy Events · Intake Profile (analysis) — Model Evidence · Model Scores · Accuracy by Horizon · Policy Comparison · "
+                   "Interval Calibration · Model Catalogue · "
                    "Guardrails · Policy Overlay · Data Quality · Track Record · Run Manifest (for audit)."),
         ("Reproducibility", "Run Manifest records the code version (git commit), the data file fingerprint (SHA-256) "
                             "and every setting; the same inputs reproduce the same numbers."),
@@ -152,6 +204,9 @@ def write_workbook(res, path: Path) -> Path:
     ws.write(r, 0, "Key messages", f["h2"]); r += 1
     for msg in ins.messages(res):
         ws.merge_range(r, 0, r, 8, "• " + msg, f["wrap"]); ws.set_row(r, 30); r += 1
+    ws.set_tab_color(TAB_COLORS["plan"])
+    b.w.sheets["Read Me"].set_tab_color(TAB_COLORS["plan"])
+    _summary_chart(b, ws, res, anchor="K4")
 
     # ── planning sheets ──────────────────────────────────────────────────
     ct = ins.country_table(res)
@@ -170,6 +225,129 @@ def write_workbook(res, path: Path) -> Path:
     b.table("Fiscal Periods", res.periods, widths={"Label": 36},
             formats={"YoY_Pct": "pct_plain", "Months_Actual": "", "Months_Forecast": ""},
             note="Fiscal year starts in April. Outlook = actuals already realised + forecast for the remaining months.")
+
+    # ── staffing & analysis sheets ──────────────────────────────────────
+    st = getattr(res, "staffing", pd.DataFrame())
+    if st is not None and len(st):
+        stc = st.drop(columns=["Level", "Country", "Region"], errors="ignore")
+        wss = b.table("Staffing Calendar", stc, widths={"Label": 30},
+                      formats={"Load_Index": "dec", "FTE_Base": "dec", "FTE_Capacity_80": "dec"},
+                      note="Next 12 months. Workload High / Low = at least 10% above / below the average forecast month. "
+                           "Plan capacity on 'Plan for (80% high)'. Set apps_per_fte_month in config to get FTE columns.")
+        _staffing_chart(b, wss, st)
+    si = getattr(res, "seasonal_index", pd.DataFrame())
+    if si is not None and len(si):
+        piv = si[si["Level"].isin(["Organisation", "Country"])].copy()
+        piv["Series"] = [ev_label(l, c, r_) for l, c, r_ in zip(piv["Level"], piv["Country"], piv["Region"])]
+        wide = piv.pivot_table(index=["Series", "Metric"], columns="Month_Name", values="Seasonal_Index", sort=False)
+        wide = wide[[m for m in ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+                     if m in wide.columns]].reset_index()
+        wsz = b.table("Seasonality", wide, widths={"Series": 30}, formats={m: "dec" for m in wide.columns[2:]},
+                      note="Seasonal index by calendar month (1.00 = average month; 1.25 = 25% busier). "
+                           "Blue = busier, orange = quieter. Robust STL on the last 4 years.")
+        if len(wide):
+            wsz.conditional_format(3, 2, 2 + len(wide), len(wide.columns) - 1, {
+                "type": "3_color_scale", "min_color": "#fdf1e3", "mid_color": "#ffffff", "max_color": "#9ec5f0",
+                "mid_type": "num", "mid_value": 1.0})
+        long = si.drop(columns=["Rank"], errors="ignore").copy()
+        long["Series"] = [ev_label(l, c, r_) for l, c, r_ in zip(long["Level"], long["Country"], long["Region"])]
+        b.table("Seasonality", long[["Series", "Level", "Metric", "Month_Name", "Seasonal_Index", "Class",
+                                     "Consistency_Pct", "Years_Used"]],
+                start_row=len(wide) + 5, widths={"Series": 30},
+                formats={"Seasonal_Index": "dec", "Consistency_Pct": "pct_plain", "Years_Used": ""},
+                note="Every series: class of each calendar month and how consistently it held across years.")
+    fs = getattr(res, "fva_summary", pd.DataFrame())
+    fv = getattr(res, "forecast_vs_actual", pd.DataFrame())
+    if fs is not None and len(fs):
+        fs2 = fs.drop(columns=["Country"], errors="ignore")
+        wsf = b.table("Forecast vs Actual", fs2, formats={c: "pct_plain" for c in fs2.columns if c.startswith("Error_")},
+                      note="Organisation: actual vs the forecast made 1, 3, 6 and 12 months earlier (walk-forward: what "
+                           "the current method would have said at the time). Live forecasts are added as actuals arrive.")
+        _fva_chart(b, wsf, fs2)
+        if fv is not None and len(fv):
+            full = fv.copy()
+            full["Series"] = [ev_label(l, c, r_) for l, c, r_ in zip(full["Level"], full["Country"], full["Region"])]
+            cols = ["Series", "Metric", "Target_Month", "Made_At", "Months_Ahead", "Forecast", "Actual", "Error_Pct",
+                    "Source"]
+            b.table("Forecast vs Actual", full[[c for c in cols if c in full.columns]], start_row=len(fs2) + 24,
+                    widths={"Series": 30, "Source": 38}, formats={"Error_Pct": "pct_plain", "Months_Ahead": ""},
+                    note="Every forecast vs actual, all series (filterable).")
+    bt_ = getattr(res, "bias_test", pd.DataFrame())
+    be = getattr(res, "bias_estimates", pd.DataFrame())
+    if bt_ is not None and len(bt_):
+        mode = res.manifest.get("statistical_overlay_mode", "none")
+        b.table("Statistical Overlay", bt_, formats={"WAPE_Pct": "pct_plain", "Bias_Pct": "pct_plain",
+                                                     "Pct_Series_Improved": "pct_plain"},
+                note=f"Recent-bias correction tested walk-forward. Adopted mode: '{mode}' ('none' = not applied because "
+                     "it did not improve accuracy by at least the configured threshold).")
+        if be is not None and len(be):
+            be2 = be.merge(res.nodes[["node_id", "Level", "Country", "Region", "Metric"]], on="node_id", how="left")
+            be2["Series"] = [ev_label(l, c, r_) for l, c, r_ in zip(be2["Level"], be2["Country"], be2["Region"])]
+            be2["Multiplier"] = np.exp(be2["Correction_Log"])
+            b.table("Statistical Overlay", be2[["Series", "Metric", "Bias_Log", "N", "Shrink_Weight", "Multiplier",
+                                                 "Mode_Adopted"]],
+                    start_row=len(bt_) + 5, widths={"Series": 30},
+                    formats={"Bias_Log": "dec", "Shrink_Weight": "dec", "Multiplier": "dec", "N": ""},
+                    note="Per series: recent log bias (actual vs forecast), empirical-Bayes shrink weight, resulting multiplier.")
+    hs = getattr(res, "human_scores", pd.DataFrame())
+    hcols = ["Label", "Metric", "Date", "Forecast", "Human_Expected", "Human_vs_Model_Pct", "Forecast_Human_Blend",
+             "Human_Submitted_By", "Human_Reason"]
+    hrows = (fc[fc["Human_Expected"].notna()][[c for c in hcols if c in fc.columns]]
+             if "Human_Expected" in fc.columns else pd.DataFrame())
+    if len(hrows) or (hs is not None and len(hs)):
+        b.table("Human Inputs", hrows if len(hrows) else pd.DataFrame({"Status": ["No manager inputs this run."]}),
+                widths={"Label": 30, "Human_Reason": 50, "Status": 60}, formats={"Human_vs_Model_Pct": "pct_plain"},
+                note="Manager expectations (Settings.xlsx sheet Human_Inputs) next to the model. Blended only for people "
+                     "with >= 6 scored months who beat the model on those months.")
+        if hs is not None and len(hs):
+            b.table("Human Inputs", hs, start_row=max(len(hrows), 1) + 5,
+                    formats={"Human_WAPE_Pct": "pct_plain", "Model_WAPE_Pct": "pct_plain", "Blend_Weight": "dec",
+                             "Months_Scored": ""}, note="Track record of each person's inputs.")
+    else:
+        b.table("Human Inputs", pd.DataFrame({"How to use": [
+            "Add a sheet 'Human_Inputs' to Settings.xlsx with columns: Country, Region (blank = country total), Metric, "
+            "Month (YYYY-MM), Expected_Volume, Submitted_By, Reason, Submitted_On.",
+            "Every run records the inputs, shows them next to the model and scores them against actuals.",
+            "After 6 scored months, a person who beats the model on the same months is blended in automatically "
+            "(inverse-error weights)."]}), widths={"How to use": 120})
+    evn = getattr(res, "events", pd.DataFrame())
+    b.table("Policy Events", evn if evn is not None and len(evn) else pd.DataFrame({"Status": ["No events listed."]}),
+            widths={"Event": 40, "Notes": 50, "Normal_Error_Range_80_Pct": 22},
+            formats={"Measured_Impact_Pct": "pct_plain", "Months_Measured": ""},
+            note="Measured impact of policy events (Settings.xlsx sheet Policy_Events): actual vs a counterfactual "
+                 "forecast made just before the event. 'Significant' = outside the normal forecast error range "
+                 "(placebo test at 12 earlier dates). Use measured impacts, not guesses, for future adjustments.")
+
+    ia = getattr(res, "intake_arrivals", pd.DataFrame())
+    if ia is not None and len(ia):
+        il = getattr(res, "intake_lead_profile", pd.DataFrame())
+        im = getattr(res, "intake_month_mix", pd.DataFrame())
+        org_l = il[il["Level"] == "Organisation"] if len(il) else il
+        if len(org_l):
+            curve = org_l.pivot_table(index="Months_Before_Start", columns="Season", values="Avg_Cumulative_Pct")
+            curve = curve.sort_index(ascending=False).reset_index()
+            b.table("Intake Profile", curve, formats={c: "pct_plain" for c in curve.columns if c != "Months_Before_Start"},
+                    note="Typical arrival curve (organisation): % of an intake's applications already received N months "
+                         "before the intake starts, by season. Descriptive only — the forecast itself is monthly.")
+        start = (len(org_l.pivot_table(index="Months_Before_Start", columns="Season", values="Avg_Cumulative_Pct"))
+                 if len(org_l) else 0) + 5
+        ia2 = ia.copy()
+        ia2["Series"] = np.where(ia2["Level"] == "Organisation", "Organisation", ia2["Country"])
+        b.table("Intake Profile", ia2[["Series", "Intake_Label", "Season", "Intake_Status", "Date", "Months_Before_Start",
+                                       "Received", "Share_of_Intake_Pct", "Cumulative_Pct"]],
+                start_row=start, widths={"Series": 26}, formats={"Share_of_Intake_Pct": "pct_plain",
+                                                               "Cumulative_Pct": "pct_plain", "Months_Before_Start": ""},
+                note="For each intake: applications received in each month (filter by Series / Intake).")
+        if len(im):
+            mm = im[im["Level"] == "Organisation"].pivot_table(index="Application_Month", columns="Season",
+                                                               values="Share_Pct").reset_index()
+            b.table("Intake Profile", mm, start_row=start + len(ia2) + 5,
+                    formats={c: "pct_plain" for c in mm.columns if c != "Application_Month"},
+                    note="Intake mix of each application month (organisation, last 3 years): % going to each season.")
+    else:
+        b.table("Intake Profile", pd.DataFrame({"Status": [
+            "Intake extract not available yet. Run: python run_pipeline.py fetch-data, then transform-data "
+            "(creates intake_final_summary.xlsx from the Intake / InYear fields)."]}), widths={"Status": 120})
 
     # ── evidence sheets ─────────────────────────────────────────────────
     meta = res.nodes[["node_id", "Level", "Country", "Region", "Metric", "Months_Of_History"]]
@@ -212,6 +390,12 @@ def write_workbook(res, path: Path) -> Path:
                      f"is '{ins.policy_label(res)}'. Bias < 0 = actuals above forecast.")
     cal_fmt = {"Offset_Lo": "dec", "Offset_Hi": "dec", "Offset_Lo_z": "dec", "Offset_Hi_z": "dec",
                "Coverage_Before_Pct": "pct_plain", "Coverage_After_Pct": "pct_plain", "Target_Pct": "", "N": ""}
+    rt = getattr(res, "reconciliation_test", pd.DataFrame())
+    if rt is not None and len(rt):
+        rtw = rt.pivot_table(index=["Metric", "Level"], columns="Method", values="WAPE_Pct").reset_index()
+        b.table("Reconciliation Test", rtw, formats={c: "pct_plain" for c in rtw.columns[2:]},
+                note="Walk-forward error (WAPE %) of each way of making regions, countries and the organisation add up; "
+                     f"'none' = each level forecast on its own. Chosen: '{res.manifest.get('reconciliation_method_chosen', '')}'.")
     b.table("Interval Calibration", res.calibration, formats=cal_fmt,
             note="Monthly ranges. Coverage = share of walk-forward actuals inside the range, measured with ranges "
                  "fitted only on earlier errors. Offsets (log scale) are added to each tail so it reaches its target.")
@@ -248,6 +432,93 @@ def write_workbook(res, path: Path) -> Path:
     b.table("Run Manifest", man, widths={"Key": 45, "Value": 100})
     b.close()
     return path
+
+
+def _chart_block(ws, b, r0, c0, header, rows):
+    ws.write_row(r0, c0, header, b.f["hdr"])
+    for i, row in enumerate(rows, start=1):
+        ws.write_datetime(r0 + i, c0, row[0].to_pydatetime(), b.f["month"])
+        for j, v in enumerate(row[1:], start=1):
+            if v is not None and np.isfinite(v):
+                ws.write_number(r0 + i, c0 + j, float(v), b.f["int"])
+    return len(rows)
+
+
+def _summary_chart(b, ws, res, anchor="K4"):
+    # Native Excel line chart: organisation receipts, last 24 months actual + 12-month forecast with 80% range.
+    h = res.history[(res.history["Level"] == "Organisation") & (res.history["Metric"] == "Received")].sort_values("Date").tail(24)
+    f = res.forecast[(res.forecast["Level"] == "Organisation") & (res.forecast["Metric"] == "Received")].sort_values("Date")
+    if h.empty or f.empty:
+        return
+    c0, r0 = 30, 3
+    rows = [(d, a, None, None, None) for d, a in zip(h["Date"], h["Actual"])]
+    rows += [(d, None, x, lo, hi) for d, x, lo, hi in zip(f["Date"], f["Forecast"], f["Lo80"], f["Hi80"])]
+    n = _chart_block(ws, b, r0, c0, ["Month", "Actual", "Forecast", "Low (80%)", "High (80%)"], rows)
+    ch = b.w.book.add_chart({"type": "line"})
+    for j, (name, color, width, dash) in enumerate([("Actual", "#52514e", 2.25, None), ("Forecast", "#2a78d6", 2.5, None),
+                                                    ("Low (80%)", "#9ec5f0", 1.25, "dash"),
+                                                    ("High (80%)", "#9ec5f0", 1.25, "dash")], start=1):
+        line = {"color": color, "width": width}
+        if dash:
+            line["dash_type"] = dash
+        ch.add_series({"name": name, "categories": ["Executive Summary", r0 + 1, c0, r0 + n, c0],
+                       "values": ["Executive Summary", r0 + 1, c0 + j, r0 + n, c0 + j], "line": line})
+    ch.set_title({"name": "Organisation — applications received per month", "name_font": {"size": 11}})
+    ch.set_y_axis({"num_format": "#,##0", "name": "Applications",
+                   "major_gridlines": {"visible": True, "line": {"color": "#e4e3df"}}})
+    ch.set_x_axis({"date_axis": True, "num_format": "mmm yy", "name": "Month"})
+    ch.set_legend({"position": "bottom"})
+    ch.set_size({"width": 820, "height": 360})
+    ws.insert_chart(anchor, ch)
+
+
+def _staffing_chart(b, ws, st):
+    o = st[(st["Level"] == "Organisation") & (st["Metric"] == "Received")]
+    if o.empty:
+        return
+    c0, r0 = 30, 3
+    n = _chart_block(ws, b, r0, c0, ["Month", "Forecast", "Plan for (80% high)"],
+                     [(r.Date, r.Forecast, r.Capacity_Plan_80) for r in o.itertuples()])
+    ch = b.w.book.add_chart({"type": "column"})
+    ch.add_series({"name": "Forecast", "categories": ["Staffing Calendar", r0 + 1, c0, r0 + n, c0],
+                   "values": ["Staffing Calendar", r0 + 1, c0 + 1, r0 + n, c0 + 1], "fill": {"color": "#2a78d6"},
+                   "gap": 60})
+    ln = b.w.book.add_chart({"type": "line"})
+    ln.add_series({"name": "Plan for (80% high)", "categories": ["Staffing Calendar", r0 + 1, c0, r0 + n, c0],
+                   "values": ["Staffing Calendar", r0 + 1, c0 + 2, r0 + n, c0 + 2],
+                   "line": {"color": "#eb6834", "width": 2, "dash_type": "dash"}})
+    ch.combine(ln)
+    ch.set_title({"name": "Organisation receipts — workload plan, next 12 months", "name_font": {"size": 11}})
+    ch.set_y_axis({"num_format": "#,##0", "name": "Applications"})
+    ch.set_x_axis({"num_format": "mmm yy", "name": "Month"})
+    ch.set_legend({"position": "bottom"})
+    ch.set_size({"width": 760, "height": 320})
+    ws.insert_chart("P3", ch)
+
+
+def _fva_chart(b, ws, fs):
+    o = fs[fs["Metric"] == "Received"].sort_values("Target_Month").tail(12)
+    if o.empty or "Forecast_1m_ahead" not in o.columns:
+        return
+    c0, r0 = 30, 3
+    cols = ["Target_Month", "Actual", "Forecast_1m_ahead"] + (["Forecast_3m_ahead"] if "Forecast_3m_ahead" in o.columns else [])
+    names = ["Month", "Actual", "Forecast 1 month before", "Forecast 3 months before"][:len(cols)]
+    n = _chart_block(ws, b, r0, c0, names, list(o[cols].itertuples(index=False)))
+    ch = b.w.book.add_chart({"type": "line"})
+    for j, (name, color, dash) in enumerate([("Actual", "#52514e", None), ("Forecast 1 month before", "#2a78d6", None),
+                                             ("Forecast 3 months before", "#2a78d6", "dash")][:len(cols) - 1], start=1):
+        line = {"color": color, "width": 2}
+        if dash:
+            line["dash_type"] = dash
+        ch.add_series({"name": name, "categories": ["Forecast vs Actual", r0 + 1, c0, r0 + n, c0],
+                       "values": ["Forecast vs Actual", r0 + 1, c0 + j, r0 + n, c0 + j], "line": line,
+                       "marker": {"type": "circle", "size": 4}})
+    ch.set_title({"name": "Organisation receipts — forecast vs actual (last 12 months)", "name_font": {"size": 11}})
+    ch.set_y_axis({"num_format": "#,##0", "name": "Applications"})
+    ch.set_x_axis({"num_format": "mmm yy", "name": "Month"})
+    ch.set_legend({"position": "bottom"})
+    ch.set_size({"width": 760, "height": 320})
+    ws.insert_chart(len(fs) + 5, 0, ch)
 
 
 def ev_label(level, country, region) -> str:

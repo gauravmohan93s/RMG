@@ -62,19 +62,34 @@ def country_table(res) -> pd.DataFrame:
 def policy_label(res) -> str:
     from ..forecasting.selection import METHOD_LABELS
     pol = res.manifest.get("config", {}).get("selection", {}).get("policy", "mean_all")
-    return METHOD_LABELS["Mean_All" if pol == "mean_all" else "Top_K"]
+    return METHOD_LABELS[{"mean_all": "Mean_All", "mean_screened": "Mean_Screened"}.get(pol, "Top_K")]
 
 
 def accuracy_table(res, metric: str) -> pd.DataFrame:
-    """Walk-forward WAPE/bias of the configured policy and the benchmark by level x horizon bucket."""
-    pc = res.policy_comparison
-    if pc is None or pc.empty or "Months_Ahead" not in pc.columns:
+    """Walk-forward WAPE / bias of the PUBLISHED procedure (combined, reconciled) vs the benchmark,
+    by level x horizon bucket."""
+    acc = res.accuracy
+    if acc is None or acc.empty:
         return pd.DataFrame()
-    pc = pc[(pc["Metric"] == metric) & pc["Level"].isin(["Organisation", "Country", "Region"])]
-    sel = pc[pc["Method"] == policy_label(res)].set_index(["Level", "Months_Ahead"])
-    ben = pc[pc["Method"] == "Seasonal naive (benchmark)"].set_index(["Level", "Months_Ahead"])
-    out = pd.DataFrame({"WAPE_Pct": sel["WAPE_Pct"], "Bias_Pct": sel["Bias_Pct"],
-                        "Benchmark_WAPE_Pct": ben["WAPE_Pct"], "N": sel["N"]}).reset_index()
+    a = acc[(acc["Metric"] == metric) & acc["Level"].isin(["Organisation", "Country", "Region"])].copy()
+    a["Months_Ahead"] = pd.cut(a["h"], [0, 3, 6, 12], labels=["1-3", "4-6", "7-12"]).astype(str)
+    def agg(method):
+        x = a[a["Method"] == method]
+        return x.groupby(["Level", "Months_Ahead"]).apply(
+            lambda g: np.average(g["WAPE_Pct"], weights=g["N"]) if g["N"].sum() else np.nan, include_groups=False)
+    out = pd.DataFrame({"WAPE_Pct": agg("Selected method (walk-forward)"),
+                        "Benchmark_WAPE_Pct": agg("Seasonal naive (benchmark)")})
+    n = a[a["Method"] == "Selected method (walk-forward)"].groupby(["Level", "Months_Ahead"])["N"].sum()
+    out["N"] = n
+    fva = getattr(res, "forecast_vs_actual", None)
+    if fva is not None and len(fva):
+        f = fva[(fva["Metric"] == metric) & fva["Source"].astype(str).str.startswith("Walk-forward")].copy()
+        f["Months_Ahead"] = pd.cut(f["Months_Ahead"], [0, 3, 6, 12], labels=["1-3", "4-6", "7-12"]).astype(str)
+        g = f.groupby(["Level", "Months_Ahead"])
+        out["Bias_Pct"] = 100 * g["Error"].sum() / g["Actual"].sum()
+    else:
+        out["Bias_Pct"] = np.nan
+    out = out.reset_index()
     order = {"Organisation": 0, "Country": 1, "Region": 2}
     return out.sort_values(["Level", "Months_Ahead"], key=lambda s: s.map(order) if s.name == "Level" else s)
 
@@ -86,11 +101,11 @@ def accuracy_buckets(res, metric: str, level: str = "Organisation") -> Dict[str,
 
 
 def overall_bias(res, metric: str, level: str = "Organisation") -> float:
-    pc = res.policy_comparison
-    if pc is None or pc.empty or "Bias_Pct" not in pc.columns:
+    fva = getattr(res, "forecast_vs_actual", None)
+    if fva is None or fva.empty:
         return np.nan
-    s = pc[(pc["Level"] == level) & (pc["Metric"] == metric) & (pc["Method"] == policy_label(res))]
-    return float(np.average(s["Bias_Pct"], weights=s["N"])) if len(s) else np.nan
+    f = fva[(fva["Level"] == level) & (fva["Metric"] == metric) & fva["Source"].astype(str).str.startswith("Walk-forward")]
+    return float(100 * f["Error"].sum() / f["Actual"].sum()) if len(f) and f["Actual"].sum() else np.nan
 
 
 def messages(res) -> List[str]:
@@ -128,6 +143,15 @@ def messages(res) -> List[str]:
                                   ("below", "a slowdown the history did not show", "optimistic"))
         out.append(f"In that test, actual receipts ran on average {abs(b):.0f}% {direction} the forecast "
                    f"({why}), so treat the baseline as {stance}.")
+    rt = getattr(res, "reconciliation_test", None)
+    chosen = res.manifest.get("reconciliation_method_chosen", "")
+    if rt is not None and len(rt) and chosen:
+        o = rt[(rt["Level"] == "Organisation") & (rt["Metric"] == "Received")].set_index("Method")["WAPE_Pct"]
+        if "none" in o and chosen in o and o["none"] > 0:
+            label = {"bottom_up": "summing the regional forecasts", "wls_var": "variance-weighted reconciliation",
+                     "mint_shrink": "MinT reconciliation"}.get(chosen, chosen)
+            out.append(f"Organisation totals are built by {label}: {100 * (1 - o[chosen] / o['none']):.0f}% more accurate "
+                       f"in testing ({o[chosen]:.0f}% vs {o['none']:.0f}% error) than forecasting the total on its own.")
     n_guard = int(res.guardrails["Guardrail_Triggered"].sum()) if len(res.guardrails) else 0
     n_emerg = int(((res.selection["Method"].str.startswith("Emerging")) &
                    (res.selection["node_id"].str.startswith("Received"))).sum())

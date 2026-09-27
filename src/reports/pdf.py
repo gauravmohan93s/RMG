@@ -131,6 +131,69 @@ def write_brief(res, path: Path) -> Path:
                         "region-level detail is in the Excel workbook.", S["small"]),
               PageBreak()]
 
+    # ── page: seasonality & staffing ────────────────────────────────────
+    sidx = getattr(res, "seasonal_index", pd.DataFrame())
+    syear = getattr(res, "seasonal_by_year", pd.DataFrame())
+    staff = getattr(res, "staffing", pd.DataFrame())
+    if sidx is not None and len(sidx):
+        so = sidx[sidx["Level"] == "Organisation"]
+        yo = syear[syear["Level"] == "Organisation"] if len(syear) else syear
+        story.append(Paragraph("Seasonality and staffing — when volume is high, medium and low", S["h2"]))
+        imgs = [_img(charts.seasonal_profile(so, "Received", "Applications received: typical month vs average"), 12.9),
+                _img(charts.seasonal_profile(so, "Submitted", "Applications submitted: typical month vs average"), 12.9)]
+        t = Table([imgs], colWidths=[13.3 * cm, 13.3 * cm])
+        t.setStyle(TableStyle([("LEFTPADDING", (0, 0), (-1, -1), 0)]))
+        story.append(t)
+        left = (_img(charts.seasonal_heatmap(yo, "Received", "Is the pattern stable? Receipts vs trend, by year "
+                                             "(1.00 = on trend)", size=(5.6, 2.6)), 12.6) if len(yo) else "")
+        right = ""
+        if len(staff):
+            so_st = staff[(staff["Level"] == "Organisation") & (staff["Metric"] == "Received")]
+            data = [["Month", "Forecast", "Plan for (80% high)", "vs avg month", "Workload", "Usual"]]
+            sty = _grid_style(len(so_st) + 1)
+            for i, r in enumerate(so_st.itertuples(), start=1):
+                data.append([f"{r.Date:%b %Y}", ins.fmt_int(r.Forecast), ins.fmt_int(r.Capacity_Plan_80),
+                             f"{100 * (r.Load_Index - 1):+.0f}%", r.Workload_Class, r.Historical_Class])
+                col = {"High": colors.HexColor("#cfe1f7"), "Low": colors.HexColor("#eef2f7")}.get(r.Workload_Class)
+                if col is not None:
+                    sty.append(("BACKGROUND", (4, i), (4, i), col))
+            sty.append(("FONT", (0, 1), (-1, -1), "Helvetica", 7))
+            tb = Table(data, colWidths=[2.1 * cm, 1.9 * cm, 2.7 * cm, 2.1 * cm, 1.8 * cm, 1.7 * cm], repeatRows=1)
+            tb.setStyle(TableStyle(sty))
+            right = [Paragraph("Staffing calendar — organisation receipts, next 12 months", S["h3"] if "h3" in S else S["body"]),
+                     tb]
+        two = Table([[left, right]], colWidths=[13.0 * cm, 13.6 * cm])
+        two.setStyle(TableStyle([("LEFTPADDING", (0, 0), (-1, -1), 0), ("VALIGN", (0, 0), (-1, -1), "TOP")]))
+        story += [two, Paragraph("High / Low = at least 10% above / below an average month. Plan capacity for the 80% "
+                                 "high figure; 'Usual' is the historical class of that calendar month. Country calendars "
+                                 "are in the workbook (Staffing Calendar sheet).", S["small"])]
+        story.append(PageBreak())
+
+    # ── page: forecast vs actual ────────────────────────────────────────
+    fsum = getattr(res, "fva_summary", pd.DataFrame())
+    if fsum is not None and len(fsum):
+        story.append(Paragraph("What we forecast vs what happened", S["h2"]))
+        imgs = [_img(charts.forecast_vs_actual(fsum, m, f"Organisation — applications {m.lower()}"), 12.9)
+                for m in ("Received", "Submitted")]
+        t = Table([imgs], colWidths=[13.3 * cm, 13.3 * cm])
+        t.setStyle(TableStyle([("LEFTPADDING", (0, 0), (-1, -1), 0)]))
+        story += [t, Paragraph(
+            "Forecasts shown were produced by the current method using only the data available at the time "
+            "(walk-forward test). From now on every live forecast is stored, and the Forecast vs Actual sheet adds "
+            "them automatically as actuals arrive — the running record of how good the forecasts are.", S["small"])]
+        bt_ = getattr(res, "bias_test", pd.DataFrame())
+        if bt_ is not None and len(bt_):
+            mode = res.manifest.get("statistical_overlay_mode", "none")
+            base = bt_[bt_["Mode"] == "none"].iloc[0]
+            best = bt_[bt_["Mode"] != "none"].sort_values("WAPE_Pct").iloc[0]
+            verdict = (f"adopted ('{mode}')." if mode != "none" else
+                       "not applied — it made accuracy worse." if best.WAPE_Pct >= base.WAPE_Pct else
+                       "not applied — the improvement was below the 1% threshold.")
+            txt = (f"Statistical overlay (recent-bias correction): walk-forward error {base.WAPE_Pct:.1f}% without, "
+                   f"{best.WAPE_Pct:.1f}% with the best ('{best.Mode}') correction — " + verdict)
+            story.append(Paragraph(txt, S["body"]))
+        story.append(PageBreak())
+
     # ── page 3: how far to trust it ─────────────────────────────────────
     story.append(Paragraph("How far can these numbers be trusted?", S["h2"]))
     imgs = [_img(charts.accuracy_by_horizon(res.accuracy, m), 12.9) for m in ("Received", "Submitted")]
