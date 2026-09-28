@@ -190,6 +190,8 @@ def _month_strip(res, level: str, country: str, S) -> Table:
             ["Received"] + [_n(v, small) for v in fr["Forecast"]],
             ["  plan for"] + [f"{_n(a, small)}–{_n(b, small)}" for a, b in zip(fr["Lo80"], fr["Hi80"])],
             ["Submitted"] + [_n(v, small) for v in fs.set_index("Date")["Forecast"].reindex(fr["Date"])]]
+    if "Previous_Forecast" in fr and fr["Previous_Forecast"].notna().any():
+        data.insert(3, ["  last month's fcst"] + [_n(v, small) if np.isfinite(v) else "new" for v in fr["Previous_Forecast"]])
     first = 2.0
     t = Table(data, colWidths=[first * cm] + [(FULL_W - first) / 12 * cm] * 12)
     st = [("FONT", (0, 0), (-1, -1), "Helvetica", 6.6), ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 6.8),
@@ -207,7 +209,7 @@ def _month_strip(res, level: str, country: str, S) -> Table:
 def _destination_table(res) -> Table:
     ct = ins.country_table(res)
     hdr = ["Destination", "Next quarter", "Next 12 months", "Plan for (12 m)", "vs last year", "Market now*",
-           "Submitted (12 m)", "Reliability"]
+           "vs last run", "Submitted (12 m)", "Reliability"]
     data, st = [hdr], []
     for i, r in enumerate(ct.itertuples(), start=1):
         small = r.Received_Forecast < 5000
@@ -216,20 +218,21 @@ def _destination_table(res) -> Table:
         data.append([r.Country, _n(getattr(r, "Received_Next_Quarter", np.nan), small), _n(r.Received_Forecast, small),
                      f"{_n(r.Received_Lo80, small)} – {_n(r.Received_Hi80, small)}", _pct(r.Received_YoY_Pct),
                      _pct(getattr(r, "Received_Recent_YoY_Pct", np.nan)),
+                     _pct(getattr(r, "Received_Change_vs_Previous_Pct", np.nan)),
                      _n(getattr(r, "Submitted_Forecast", np.nan), small),
                      f"{rel}" + (f"  ±{err:.0f}%" if np.isfinite(err) else "")])
         if rel in REL_BG:
-            st += [("BACKGROUND", (7, i), (7, i), REL_BG[rel]), ("TEXTCOLOR", (7, i), (7, i), colors.white)]
+            st += [("BACKGROUND", (8, i), (8, i), REL_BG[rel]), ("TEXTCOLOR", (8, i), (8, i), colors.white)]
         gap = abs(r.Received_YoY_Pct - getattr(r, "Received_Recent_YoY_Pct", np.nan))
         if np.isfinite(gap) and gap > GROWTH_GAP_PP:
             st.append(("BACKGROUND", (5, i), (5, i), colors.HexColor("#fde2c8")))
         if r.Level == "Organisation":
             st.append(("FONT", (0, i), (-2, i), "Helvetica-Bold", 7.3))
-    w = [5.0, 2.6, 2.8, 3.8, 2.4, 2.4, 3.0, 3.4]
+    w = [4.4, 2.4, 2.6, 3.5, 2.2, 2.3, 2.9, 2.7, 3.2]
     t = Table(data, colWidths=[x * cm for x in w], repeatRows=1)
     t.setStyle(TableStyle([("FONT", (0, 0), (-1, -1), "Helvetica", 7.3), ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 7.3),
                            ("BACKGROUND", (0, 0), (-1, 0), HEAD), ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
-                           ("ALIGN", (7, 0), (7, -1), "CENTER"), ("LINEBELOW", (0, 0), (-1, -1), 0.25, LINE),
+                           ("ALIGN", (8, 0), (8, -1), "CENTER"), ("LINEBELOW", (0, 0), (-1, -1), 0.25, LINE),
                            ("TOPPADDING", (0, 0), (-1, -1), 1.8), ("BOTTOMPADDING", (0, 0), (-1, -1), 1.8)] + st))
     return t
 
@@ -263,6 +266,94 @@ def _critical_banner(res, S) -> List:
 def _page_org(res, S) -> List:
     page = _page_dashboard(res, S, "Organisation", ORG, "Application flow forecast — Organisation")
     return page[:1] + _critical_banner(res, S) + page[1:] + [PageBreak()]
+
+
+MISS_BG = [(10, colors.HexColor("#2e9e5b")), (20, colors.HexColor("#e0a100")), (1e9, colors.HexColor("#d6453d"))]
+
+
+def _page_proof(res, S) -> List:
+    """Proof on the latest completed quarter: what this procedure forecast 3 months ago vs what happened."""
+    d = ins.last_quarter_proof(res)
+    if d.empty:
+        return []
+    made = pd.Timestamp(d["Made_At"].iloc[0])
+    mcols = [pd.Timestamp(d[f"M{i}"].iloc[0]) for i in (1, 2, 3)]
+    out = [_header(f"Proof: forecast made in {made:%b %Y} vs actual", res, S), Spacer(0, 5)]
+    for metric in ("Received", "Submitted"):
+        x = d[d["Metric"] == metric]
+        if x.empty:
+            continue
+        hdr = ["Applications " + metric.lower()] + [f"{m:%b %Y} forecast / actual" for m in mcols] +               ["Quarter forecast", "Quarter actual", "Miss"]
+        data, st = [hdr], []
+        for i, r in enumerate(x.itertuples(), start=1):
+            small = r.Actual_Total < 5000
+            data.append([r.Country] + [f"{_n(getattr(r, f'F{j}'), small)} / {_n(getattr(r, f'A{j}'), small)}" for j in (1, 2, 3)]
+                        + [_n(r.Forecast_Total, small), _n(r.Actual_Total, small), _pct(r.Miss_Pct)])
+            bg = next(c for lim, c in MISS_BG if abs(r.Miss_Pct) <= lim) if np.isfinite(r.Miss_Pct) else REL_BG["New"]
+            st += [("BACKGROUND", (6, i), (6, i), bg), ("TEXTCOLOR", (6, i), (6, i), colors.white)]
+            if r.Level == "Organisation":
+                st.append(("FONT", (0, i), (-2, i), "Helvetica-Bold", 7.3))
+        t = Table(data, colWidths=[x_ * cm for x_ in (5.4, 3.7, 3.7, 3.7, 3.1, 3.1, 2.6)], repeatRows=1)
+        t.setStyle(TableStyle([("FONT", (0, 0), (-1, -1), "Helvetica", 7.3), ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 7.1),
+                               ("BACKGROUND", (0, 0), (-1, 0), HEAD), ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+                               ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("LINEBELOW", (0, 0), (-1, -1), 0.25, LINE),
+                               ("TOPPADDING", (0, 0), (-1, -1), 1.7), ("BOTTOMPADDING", (0, 0), (-1, -1), 1.7)] + st))
+        out += [t, Spacer(0, 6)]
+    out.append(Paragraph(
+        f"Forecasts re-made with the method used today and only the data available at the end of {made:%B %Y}. "
+        "Miss: green up to 10%, amber 10–20%, red over 20% ( − = actual came in higher). Regenerated every month.",
+        S["tl"]))
+    return out + [PageBreak()]
+
+
+def _miss_bg(v: float):
+    """Diverging colour: blue = forecast too low (actual higher), orange = too high; darker = bigger miss."""
+    if not np.isfinite(v):
+        return colors.white
+    steps = [(5, ("#eef4fb", "#fdf1e7")), (10, ("#cfe1f7", "#fbd9bf")), (20, ("#8fbbe9", "#f5ad7c")),
+             (1e9, ("#2a78d6", "#e0662a"))]
+    for lim, (lo, hi) in steps:
+        if abs(v) <= lim:
+            return colors.HexColor(lo if v < 0 else hi)
+
+
+def _page_direction(res, S) -> List:
+    """Latest vintages vs actuals: where the forecast has been running low or high, most recent on the right."""
+    out = [_header("Direction check: our latest forecasts vs what happened", res, S), Spacer(0, 5)]
+    any_ = False
+    for metric in ("Received", "Submitted"):
+        d = ins.vintage_matrix(res, metric=metric)
+        if d.empty:
+            continue
+        any_ = True
+        vcols = [c for c in d.columns if c not in ("Destination", "Level")]
+        data = [[f"Applications {metric.lower()}: miss by forecast made in"] + [c.replace("->", "for") for c in vcols]]
+        st = []
+        for i, r in enumerate(d.itertuples(index=False), start=1):
+            vals = [getattr(r, c) if False else r[2 + j] for j, c in enumerate(vcols)]
+            data.append([r[0]] + [_pct(v) for v in vals])
+            for j, v in enumerate(vals, start=1):
+                st.append(("BACKGROUND", (j, i), (j, i), _miss_bg(v)))
+                if np.isfinite(v) and abs(v) > 20:
+                    st.append(("TEXTCOLOR", (j, i), (j, i), colors.white))
+            if r[1] == "Organisation":
+                st.append(("FONT", (0, i), (-1, i), "Helvetica-Bold", 7.3))
+        w0 = 7.0
+        t = Table(data, colWidths=[w0 * cm] + [(FULL_W - w0) / max(len(vcols), 1) * cm] * len(vcols), repeatRows=1)
+        t.setStyle(TableStyle([("FONT", (0, 0), (-1, -1), "Helvetica", 7.3), ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 7.1),
+                               ("BACKGROUND", (0, 0), (-1, 0), HEAD), ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+                               ("LINEBELOW", (0, 0), (-1, -1), 0.25, LINE), ("TOPPADDING", (0, 0), (-1, -1), 1.7),
+                               ("BOTTOMPADDING", (0, 0), (-1, -1), 1.7)] + st))
+        out += [t, Spacer(0, 6)]
+    if not any_:
+        return []
+    out.append(Paragraph(
+        "Each column is one forecast, re-made with today's method and only the data available when it was made, "
+        "compared with the months that have since happened (first three columns: a full quarter; last two: the "
+        "latest two months and the latest month). Blue = actual came in higher than forecast, orange = lower; darker "
+        "= bigger miss. A colour change towards the right is an early sign of a turning point; the latest columns "
+        "feed the direction signal applied to this month's receipts forecast.", S["tl"]))
+    return out + [PageBreak()]
 
 
 def _page_destinations(res, S) -> List:
@@ -406,7 +497,7 @@ def _countries(res) -> List[tuple]:
 def write_brief(res, path: Path) -> Path:
     """The monthly pack: organisation, destinations, workload, track record, one page per destination."""
     S = _styles()
-    story: List = _page_org(res, S) + _page_destinations(res, S) + _page_workload(res, S) + _page_track(res, S)
+    story: List = _page_org(res, S) + _page_proof(res, S) + _page_direction(res, S) + _page_destinations(res, S) + _page_workload(res, S) + _page_track(res, S)
     for c, lab in _countries(res):
         story += _page_country(res, S, c, lab) + [PageBreak()]
     story += _page_legend(res, S)

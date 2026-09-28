@@ -409,6 +409,28 @@ def write_workbook(res, path: Path) -> Path:
             note="Acceptance checks fixed in advance and scored every month. Tested = forecasts re-made for past months "
                  "with only the data then available; Live = published forecasts as their actuals arrive. Trust a use once "
                  "the live column passes for 3 consecutive months.")
+    ctest = getattr(res, "calendar_test", None)
+    if ctest is not None and len(ctest):
+        ctw = ctest.pivot_table(index=["Window", "Level"], columns="Variant", values="Error_Pct").reset_index()
+        b.table("Calendar Effects Test", ctw, formats={c: "pct_plain" for c in ctw.columns[2:]},
+                note="Receipts: typical miss (%) of single months 1-3 ahead and of the next quarter, without and with "
+                     "working-day and festival effects (Diwali, Holi, Eid) per 26th-25th cycle. "
+                     f"Used: {res.manifest.get('calendar_effects_used', False)}; effects (log): "
+                     f"{res.manifest.get('calendar_effects_log_coefficients', {})}.")
+    dtab = getattr(res, "decisions", None)
+    if dtab is not None and len(dtab):
+        b.table("Method Decisions", dtab, widths={"Reason": 60, "Scores": 60},
+                note="Each method choice is re-tested every run but only changed in the first month of a quarter "
+                     "(Jan/Apr/Jul/Oct), or earlier if the evidence is at least 6% in favour. Scores = next-quarter "
+                     "(or monthly, for calendar effects) error averaged over levels; lower is better.")
+    vtest = getattr(res, "vintage_test", None)
+    if vtest is not None and len(vtest):
+        vtw = vtest.pivot_table(index="Level", columns="Variant", values="Quarter_Error_Pct").reset_index()
+        b.table("Direction Signal Test", vtw, formats={c: "pct_plain" for c in vtw.columns[1:]},
+                note="Receipts: next-quarter typical miss (%) without and with the direction signal from the latest "
+                     "forecast vintages (last 3 full quarters + latest 2 partial, at country level, half strength). "
+                     f"Used: {res.manifest.get('vintage_signal_used', False)}. Latest signal by country (% actual vs "
+                     f"forecast): {res.manifest.get('vintage_signal_pct_latest', {})}.")
     ft = getattr(res, "funnel_test", None)
     if ft is not None and len(ft):
         ftw = ft.pivot_table(index="Level", columns="Variant", values="Quarter_Error_Pct").reset_index()
@@ -454,8 +476,15 @@ def write_workbook(res, path: Path) -> Path:
             note=f"Source: {res.manifest.get('overlay_source', '')}. Only Approved rows with an owner and date are applied.")
     dq = res.dq
     b.table("Data Quality", dq, widths={"Detail": 90, "Issue": 34})
+    row_next = len(dq) + 5
+    dr = getattr(res, "data_revisions", None)
+    if dr is not None and len(dr):
+        b.table("Data Quality", dr, start_row=row_next,
+                formats={"Typical_Revision_Pct": "pct_plain", "Months_Evidence": ""},
+                note="Late entries: how much a month's count grew after it was first reported (from saved extracts).")
+        row_next += len(dr) + 5
     ss = res.series_status
-    b.table("Data Quality", ss, start_row=len(dq) + 5,
+    b.table("Data Quality", ss, start_row=row_next,
             formats={"Months_Of_History": "", "Zero_Filled_Months": ""}, note="Status of every Country × Region series")
     ts = res.track_scorecard
     if ts is None or ts.empty:

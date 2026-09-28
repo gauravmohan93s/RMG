@@ -67,7 +67,8 @@ def country_table(res) -> pd.DataFrame:
                         f"{m}_Hi80": r12.get("Hi80", np.nan), f"{m}_Last_Year": r12["Same_Months_Last_Year"],
                         f"{m}_YoY_Pct": r12["YoY_Pct"], f"{m}_Adjusted": r12["Forecast_Adjusted"],
                         f"{m}_Reliability": r12.get("Reliability", ""),
-                        f"{m}_Quarter_Error_Pct": r12.get("Typical_Quarter_Error_Pct", np.nan)})
+                        f"{m}_Quarter_Error_Pct": r12.get("Typical_Quarter_Error_Pct", np.nan),
+                        f"{m}_Change_vs_Previous_Pct": r12.get("Change_vs_Previous_Pct", np.nan)})
             if len(r3):
                 row.update({f"{m}_Next_Quarter": r3.iloc[0]["Forecast"], f"{m}_NQ_Lo80": r3.iloc[0].get("Lo80", np.nan),
                             f"{m}_NQ_Hi80": r3.iloc[0].get("Hi80", np.nan)})
@@ -313,3 +314,76 @@ def health_check(res) -> pd.DataFrame:
                          "Tested": f"±{w:.0f}% vs ±{bw:.0f}%", "Tested_Status": _status(w < bw),
                          "Live": "–", "Live_Status": "Not yet"})
     return pd.DataFrame(rows)
+
+
+def last_quarter_proof(res, months: int = 3) -> pd.DataFrame:
+    """What the current procedure forecast `months` months ago for the months that have now happened:
+    one row per destination x metric, with each month and the total. Uses only the walk-forward replay
+    (forecasts made with data up to that month end)."""
+    fva = getattr(res, "forecast_vs_actual", None)
+    if fva is None or fva.empty:
+        return pd.DataFrame()
+    wf = fva[fva["Source"].astype(str).str.startswith("Walk-forward")]
+    n_reg = wf[wf["Level"] == "Region"].groupby("Country")["Region"].nunique()
+    single = wf[(wf["Level"] == "Region") & wf["Country"].isin(n_reg[n_reg == 1].index)
+                & ~wf["Country"].isin(wf.loc[wf["Level"] == "Country", "Country"])].assign(Level="Country")
+    f = pd.concat([wf[wf["Level"].isin(["Organisation", "Country"])], single], ignore_index=True)
+    f["Made_At"] = pd.to_datetime(f["Made_At"])
+    f["Target_Month"] = pd.to_datetime(f["Target_Month"])
+    made = pd.Timestamp(res.last_actual) - pd.DateOffset(months=months)
+    f = f[(f["Made_At"] == made) & f["Months_Ahead"].between(1, months)]
+    if f.empty:
+        return pd.DataFrame()
+    rows = []
+    for (lvl, cty, m), g in f.groupby(["Level", "Country", "Metric"], sort=False):
+        g = g.sort_values("Target_Month")
+        if len(g) < months:
+            continue
+        row = {"Level": lvl, "Country": "Organisation" if lvl == "Organisation" else cty, "Metric": m, "Made_At": made}
+        for i, r in enumerate(g.itertuples(), start=1):
+            row[f"M{i}"], row[f"F{i}"], row[f"A{i}"] = r.Target_Month, r.Forecast, r.Actual
+        row["Forecast_Total"], row["Actual_Total"] = float(g["Forecast"].sum()), float(g["Actual"].sum())
+        row["Miss_Pct"] = 100 * (row["Forecast_Total"] / row["Actual_Total"] - 1) if row["Actual_Total"] else np.nan
+        rows.append(row)
+    d = pd.DataFrame(rows)
+    if d.empty:
+        return d
+    d["_o"] = (d["Level"] != "Organisation").astype(int)
+    return d.sort_values(["Metric", "_o", "Actual_Total"], ascending=[True, True, False]).drop(columns="_o")
+
+
+def vintage_matrix(res, n_vintages: int = 5, metric: str = "Received") -> pd.DataFrame:
+    """Miss (%) of each of the latest forecast vintages on the months already known, per destination.
+    Vintages made 5, 4, 3 months ago cover a full quarter; 2 and 1 months ago, the latest 2 and 1 months.
+    Columns are ordered oldest -> newest, so a turning point shows as a change of colour to the right."""
+    fva = getattr(res, "forecast_vs_actual", None)
+    if fva is None or fva.empty:
+        return pd.DataFrame()
+    wf = fva[fva["Source"].astype(str).str.startswith("Walk-forward") & (fva["Metric"] == metric)]
+    n_reg = wf[wf["Level"] == "Region"].groupby("Country")["Region"].nunique()
+    single = wf[(wf["Level"] == "Region") & wf["Country"].isin(n_reg[n_reg == 1].index)
+                & ~wf["Country"].isin(wf.loc[wf["Level"] == "Country", "Country"])].assign(Level="Country")
+    f = pd.concat([wf[wf["Level"].isin(["Organisation", "Country"])], single], ignore_index=True)
+    f["Made_At"], f["Target_Month"] = pd.to_datetime(f["Made_At"]), pd.to_datetime(f["Target_Month"])
+    last = pd.Timestamp(res.last_actual)
+    cols, rows = [], {}
+    for k in range(n_vintages, 0, -1):
+        made = last - pd.DateOffset(months=k)
+        x = f[(f["Made_At"] == made) & f["Months_Ahead"].between(1, 3) & (f["Target_Month"] <= last)]
+        if x.empty:
+            continue
+        t0, t1 = x["Target_Month"].min(), x["Target_Month"].max()
+        col = f"{made:%b} -> {t0:%b}" + (f"–{t1:%b}" if t1 != t0 else "")
+        cols.append(col)
+        g = x.groupby(["Level", "Country"])[["Forecast", "Actual"]].sum()
+        for (lvl, cty), r in g.iterrows():
+            key = ("Organisation" if lvl == "Organisation" else cty)
+            rows.setdefault(key, {"Level": lvl, "Volume": 0.0})
+            rows[key][col] = 100 * (r["Forecast"] / r["Actual"] - 1) if r["Actual"] > 0 else np.nan
+            rows[key]["Volume"] += r["Actual"]
+    d = pd.DataFrame.from_dict(rows, orient="index").rename_axis("Destination").reset_index()
+    if d.empty:
+        return d
+    d["_o"] = (d["Level"] != "Organisation").astype(int)
+    d = d.sort_values(["_o", "Volume"], ascending=[True, False]).drop(columns=["_o", "Volume"])
+    return d[["Destination", "Level"] + cols]

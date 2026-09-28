@@ -124,6 +124,26 @@ def _quarter_errors(h: pd.DataFrame, nodes: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(out)
 
 
+def overlay_quarter_test(honest: pd.DataFrame, variants: Dict[str, pd.Series], nodes: pd.DataFrame) -> pd.DataFrame:
+    """Each overlay mode judged on next-quarter totals per level (bottom-up), like every other component."""
+    rows = [_quarter_errors(honest, nodes).assign(Mode="none")]
+    for mode, pol in (variants or {}).items():
+        if mode != "none":
+            rows.append(_quarter_errors(honest.assign(Policy=pol), nodes).assign(Mode=mode))
+    return pd.concat(rows, ignore_index=True)
+
+
+def decide_quarter(qtest: pd.DataFrame, min_gain_pct: float = 3.0) -> str:
+    """'none' unless a mode lowers the level-averaged next-quarter error by >= min_gain_pct (relative)."""
+    if qtest is None or qtest.empty:
+        return "none"
+    avg = qtest.groupby("Mode")["Quarter_Error_Pct"].mean()
+    if "none" not in avg or len(avg) < 2:
+        return "none"
+    best = avg.drop("none").idxmin()
+    return str(best) if (avg["none"] - avg[best]) / avg["none"] * 100 >= min_gain_pct else "none"
+
+
 def smearing_test(comb: pd.DataFrame, honest: pd.DataFrame, nodes: pd.DataFrame):
     """Walk-forward: factors at each origin e use only targets <= e. Returns (table, smeared honest Policy)."""
     if honest is None or honest.empty:

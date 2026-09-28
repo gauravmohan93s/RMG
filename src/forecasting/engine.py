@@ -24,11 +24,15 @@ from ..config import CODE_ROOT, INTAKE_FILE, RAW_FILE, SETTINGS_FILE, Settings
 from ..data.prepare import METRICS, ORG, TOTAL, Panel, build_panel, load_raw, node_id
 from ..governance import manifest as mf
 from ..governance import tracking
+from ..governance.decisions import DecisionLock
+from ..governance import snapshots as snp
 from ..analysis import seasonality as seas
 from ..analysis import signals as sig
 from ..analysis import intake as itk
 from . import bias_correction as bc
+from . import calendar_fx as cx
 from . import funnel as fn
+from . import vintage as vt
 from . import guardrails as gr
 from . import intervals as iv
 from . import overlay as ov
@@ -40,6 +44,7 @@ from .backtest import run_backtest
 from .models import model_catalogue, pooled_seasonal_forecast, seasonal_index
 
 LOG = logging.getLogger("rmg.engine")
+DECISIONS_FILE = "method_decisions.json"
 HISTORY_FILE = "prediction_history_v2.parquet"
 EMERGING_METHOD = "PooledSeasonal"
 
@@ -75,6 +80,10 @@ class RunResult:
     reconciliation_test: pd.DataFrame
     point_estimate_test: pd.DataFrame
     funnel_test: pd.DataFrame
+    vintage_test: pd.DataFrame
+    decisions: pd.DataFrame
+    calendar_test: pd.DataFrame
+    data_revisions: pd.DataFrame
     seasonal_index: pd.DataFrame
     seasonal_by_year: pd.DataFrame
     staffing: pd.DataFrame
@@ -115,6 +124,10 @@ ARTEFACTS = {
     "reconciliation_test": "Evaluation/reconciliation_test.csv",
     "point_estimate_test": "Evaluation/point_estimate_test.csv",
     "funnel_test": "Evaluation/submitted_funnel_test.csv",
+    "vintage_test": "Evaluation/vintage_signal_test.csv",
+    "decisions": "Evaluation/method_decisions.csv",
+    "calendar_test": "Evaluation/calendar_effects_test.csv",
+    "data_revisions": "Data/data_revisions.csv",
     "seasonal_index": "Analysis/seasonal_index.csv",
     "seasonal_by_year": "Analysis/seasonal_by_year.csv",
     "staffing": "Analysis/staffing_calendar.csv",
@@ -145,6 +158,11 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
                  intake_raw: Optional[pd.DataFrame] = None) -> RunResult:
     timings: Dict[str, float] = {}
     t0 = time.perf_counter()
+    # method decisions are locked per quarter (see governance/decisions.py)
+    lock = DecisionLock((history_path.parent if history_path else out_dir.parent) / DECISIONS_FILE, run_date)
+
+    def _avg(tbl, key):
+        return tbl.groupby(key)["Quarter_Error_Pct"].mean().to_dict() if tbl is not None and len(tbl) else {}
 
     def lap(name):
         nonlocal t0
@@ -163,6 +181,19 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
     T = len(panel.months)
     months_ext = pd.date_range(panel.months[0], periods=T + H, freq="MS")
     last_actual = panel.end
+    # extract snapshot + late-entry revisions of earlier months (measured from the second month on)
+    snap_dir = (history_path.parent if history_path else out_dir.parent) / "Snapshots"
+    data_rev = snp.summary(snp.revisions(raw, snap_dir, last_actual))
+    try:
+        snp.save(raw, snap_dir, last_actual)
+    except OSError as exc:
+        LOG.warning("could not save extract snapshot: %s", exc)
+    for r in data_rev[data_rev["Material"]].itertuples():
+        panel.dq = pd.concat([panel.dq, pd.DataFrame([{
+            "Issue": "Late entries: recent months get revised", "Country": r.Country, "Region": TOTAL,
+            "Detail": f"{r.Metric}: a month's count rose by {r.Typical_Revision_Pct:+.1f}% (median of "
+                      f"{r.Months_Evidence} months) after it was first reported; the latest month is likely "
+                      "under-counted by about as much."}])], ignore_index=True)
     tour = nodes[nodes["Status"] == "Mature"]
     emer = nodes[nodes["Status"] == "Emerging"]
     lap("data")
@@ -186,10 +217,15 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
     fb = ((selection["Honest_N"] >= sel.MIN_KNOWN_PAIRS)
           & (selection["Honest_Skill_vs_Benchmark"] < settings.selection.fallback_if_skill_below)
           & (selection["Selected_Models"] != B))
-    selection.loc[fb, "Selection_Reason"] += (" Walk-forward test: the combination lost to seasonal naive "
-                                               "-> benchmark used instead.")
-    selection.loc[fb, "Selected_Models"] = B
-    selection.loc[fb, "Method"] = "Benchmark fallback (failed walk-forward test)"
+    # v2.2: a hedge instead of a hard switch. Where the model average lost to 'same month last year' in
+    # the walk-forward test, publish w(h) x last year + (1-w(h)) x model average, with w rising from 0.5
+    # (next month) to 1 (12 months ahead). Tested on these series: next-quarter miss 14.3% -> 11.6%,
+    # 6 months 14.4% -> 10.9%, 12 months 12.1% -> 14.1% (docs/experiments/2026-09-28_bias_and_funnel.md)
+    hedge_ids = set(selection.loc[fb, "node_id"])
+    selection.loc[fb, "Selection_Reason"] += (" Walk-forward test: the combination lost to seasonal naive -> "
+                                               "published as a hedge: last year's level weighted 50% next month "
+                                               "rising to 100% at 12 months, the model average for the rest.")
+    selection.loc[fb, "Method"] = "Hedge: model average + same month last year (walk-forward)"
     selection = selection.merge(bt.plan, on="node_id", how="left")
     lap("selection")
 
@@ -197,11 +233,24 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
     selected = selection.set_index("node_id")["Selected_Models"]
     base = sel.combine(bt.final, selected)
     comb_bt = sel.combine(bt.preds, selected)
+    if hedge_ids:
+        base = _hedge(base, bt.final, hedge_ids, B)
+        comb_bt = _hedge(comb_bt, bt.preds, hedge_ids, B)
+        hm = honest["node_id"].isin(hedge_ids)
+        w = hedge_weight(honest.loc[hm, "h"].to_numpy())
+        honest.loc[hm, "Policy"] = w * honest.loc[hm, "Benchmark"] + (1 - w) * honest.loc[hm, "Mean_All"]
 
     # statistical overlay: recent-bias correction, adopted only if it wins walk-forward
     bcfg = settings.bias_correction
     bias_test, variants = bc.walk_forward_test(comb_bt, honest, bcfg.window, bcfg.max_h)
-    bias_mode = bc.decide(bias_test, bcfg.min_gain_pct) if bcfg.enabled else "none"
+    # decided on next-quarter totals with the common >= 3% rule (a 1% monthly-WAPE gate flipped between
+    # runs and moved the organisation forecast by 12%); the monthly table is kept as evidence
+    bias_qtest = bc.overlay_quarter_test(honest, variants, tour)
+    bias_mode = (lock.decide("statistical_overlay", bc.decide_quarter(bias_qtest), _avg(bias_qtest, "Mode"))
+                 if bcfg.enabled else "none")
+    if len(bias_test) and len(bias_qtest):
+        bias_test = bias_test.merge(bias_qtest.groupby("Mode")["Quarter_Error_Pct"].mean().rename(
+            "Quarter_Error_Pct_Level_Avg").reset_index(), on="Mode", how="left")
     bias_est = bc.estimate(comb_bt, T - 1, bcfg.window, bcfg.max_h)
     bias_est["Mode_Adopted"] = bias_mode
     if bias_mode != "none":
@@ -222,7 +271,12 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
     # that gives more accurate quarter totals across levels in the walk-forward test is published
     smear_test, smear_honest = bc.smearing_test(comb_bt, honest, tour)
     pe = settings.point_estimate
-    use_mean = pe == "mean" or (pe == "auto" and bc.decide_smearing(smear_test))
+    if pe == "auto":
+        pe_scores = {("mean" if "mean" in k else "median"): v for k, v in _avg(smear_test, "Mode").items()}
+        use_mean = lock.decide("point_estimate", "mean" if bc.decide_smearing(smear_test) else "median",
+                               pe_scores) == "mean"
+    else:
+        use_mean = pe == "mean"
     if use_mean and smear_honest is not None:
         f_now = bc.smearing_factors(comb_bt, T - 1)
         base["Pred"] = base["Pred"].to_numpy() * base["node_id"].map(f_now).fillna(1.0).to_numpy()
@@ -233,7 +287,7 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
     # funnel: submissions follow receipts (a leading indicator); adopted only if it wins walk-forward
     Y_full = fn.full_series(panel)
     funnel_test, funnel_var = fn.walk_forward_test(honest, tour, Y_full)
-    funnel_used = fn.decide(funnel_test)
+    funnel_used = lock.decide("submitted_funnel", fn.decide(funnel_test), _avg(funnel_test, "Variant"))
     if funnel_used != "model":
         honest = honest.assign(Policy=funnel_var[funnel_used])
         f_bt = fn.funnel_forecast(comb_bt, "Pred", Y_full)
@@ -281,17 +335,52 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
     # reconciliation method: replayed walk-forward, chosen on evidence ("auto") — and from here on the
     # walk-forward forecasts are the reconciled ones, i.e. exactly the procedure that is published
     recon_test, recon_detail = rc.walk_forward_test(honest, comb_bt, nodes, return_detail=True)
-    recon_method = (rc.choose_method(recon_test) if settings.reconciliation_method == "auto"
-                    else settings.reconciliation_method)
+    # chosen on next-quarter totals per level (how the numbers are used), not monthly error
+    rq = rc.quarter_errors(recon_detail)
+    recon_method = (lock.decide("reconciliation", rc.choose_method_quarter(recon_detail), _avg(rq, "Method"))
+                    if settings.reconciliation_method == "auto" else settings.reconciliation_method)
+    if len(recon_test) and len(rq):
+        recon_test = recon_test.merge(rq, on=["Metric", "Level", "Method"], how="left")
     if len(recon_detail) and recon_method in set(recon_detail["Method"]):
         rd = recon_detail[recon_detail["Method"] == recon_method][["node_id", "o", "h", "Pred"]]
         honest = honest.merge(rd, on=["node_id", "o", "h"], how="left")
         honest["Policy"] = honest["Pred"].fillna(honest["Policy"])
         honest = honest.drop(columns="Pred")
 
+    # direction signal from the latest PUBLISHED vintages (receipts): the last three full quarters plus
+    # the latest two partial ones, read at country level; regions corrected, totals re-summed; adopted
+    # only if it wins the next-quarter test
+    vintage_test, vintage_corr = vt.walk_forward_test(honest, tour)
+    v_scores = {("on" if k == "vintage" else "off"): v for k, v in _avg(vintage_test, "Variant").items()}
+    vintage_used = lock.decide("direction_signal", "on" if vt.decide(vintage_test) else "off", v_scores) == "on"
+    vintage_signal: Dict[str, float] = {}
+    v_sig: dict = {}
+    if vintage_used:
+        v_sig = vt.signals(honest, sorted(set(honest["o"]) | {T - 1}))
+        honest = honest.assign(Policy=vintage_corr)
+        vintage_signal = {k[0]: round(100 * float(np.expm1(v)), 1) for k, v in v_sig.items()
+                          if k[1] == T - 1 and np.isfinite(v) and "_TOTAL" in k[0]}
+
+    # calendar & festival effects per 26th-25th cycle (receipts): same factor for every series in a month,
+    # so totals still add up; adopted on month-level accuracy (months 1-3), never at the cost of quarters
+    cal_D = cx.deltas(months_ext)
+    calendar_test, cal_corr, cal_coefs = cx.walk_forward_test(honest, tour, cal_D)
+    cal_scores = ({("on" if v == "calendar" else "off"): e for v, e in
+                   calendar_test[calendar_test["Window"] == "Month"].groupby("Variant")["Error_Pct"].mean().items()}
+                  if len(calendar_test) else {})
+    calendar_used = lock.decide("calendar_effects", "on" if cx.decide(calendar_test) else "off", cal_scores) == "on"
+    cal_final: dict = {}
+    if calendar_used:
+        cal_final = cx.coefficients(honest, tour, cal_D, [T - 1])
+        honest = honest.assign(Policy=cal_corr)
+
     # 5) intervals ──────────────────────────────────────────────────────────
     # ranges are built from the errors of the forecasts as PUBLISHED (e.g. regions summed bottom-up)
     comb_pub = rl.published_backtest(comb_bt, tour, recon_method)
+    if vintage_used:
+        comb_pub = comb_pub.assign(Pred=vt.apply_published(comb_pub, "Pred", tour, v_sig).to_numpy())
+    if calendar_used:
+        comb_pub = comb_pub.assign(Pred=comb_pub["Pred"].to_numpy() * cx.factors(comb_pub, cal_D, cal_coefs))
     # the way errors become a range (empirical quantiles vs centred robust spread) is chosen per level
     # group and window by a proper scoring rule, replayed with only the errors realised at each origin
     q, bq, range_test, calib, block_calib, range_tested = rg.build(comb_pub, nodes, levels, settings.intervals.min_obs, H,
@@ -305,16 +394,21 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
     rec_parts, recon_used = [], {}
     for metric in METRICS:
         mn = nodes[nodes["Metric"] == metric]
-        S, all_ids, _ = rc.summing_matrix(mn)
+        S, all_ids, b_ids = rc.summing_matrix(mn)
         Y = piv.loc[all_ids].to_numpy()
         var = rc.node_variances(all_ids, resid_h1, level_hint)
         E = resid_h1.pivot_table(index="o", columns="node_id", values="e").reindex(columns=all_ids).to_numpy()
-        Yt, used = rc.reconcile(Y, S, recon_method, var=var, E=E)
+        last12 = {b: float(panel.y[b][-12:].sum()) if b in panel.y else 0.0 for b in b_ids}
+        Yt, used = rc.reconcile(Y, S, recon_method, var=var, E=E, shares=rc.region_shares(S, b_ids, last12))
         recon_used[metric] = used
         for i, nid in enumerate(all_ids):
             rec_parts.append(pd.DataFrame({"node_id": nid, "h": np.arange(1, H + 1),
                                            "Forecast": Yt[i], "Base_Forecast": Y[i]}))
     rec = pd.concat(rec_parts, ignore_index=True)
+    if vintage_used:
+        rec["Forecast"] = vt.apply_published(rec, "Forecast", nodes, v_sig, fixed_origin=T - 1).to_numpy()
+    if calendar_used and cal_final:
+        rec["Forecast"] = rec["Forecast"].to_numpy() * cx.factors(rec, cal_D, cal_final, fixed_origin=T - 1)
     lap("reconcile")
 
     # 7) assemble ───────────────────────────────────────────────────────────
@@ -369,6 +463,9 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
     lap("assemble")
 
     # 9) summaries ──────────────────────────────────────────────────────────
+    # revisions: last month's forecast for the same target months, shown next to this month's
+    prev = tracking.previous_forecast(history_path or (out_dir.parent / HISTORY_FILE), last_actual)
+    fc = fc.merge(prev[tracking.KEYS + ["Previous_Forecast"]], on=tracking.KEYS, how="left") if len(prev) else         fc.assign(Previous_Forecast=np.nan)
     totals = _totals(fc, bq, panel.history, levels)
     periods = _periods(fc, panel.history, settings.data.fin_year_start_month, bq, levels)
     accuracy = sel.accuracy_by_horizon(honest, bt.preds, nodes)
@@ -402,6 +499,7 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
     catalogue = pd.DataFrame(model_catalogue(settings.models.enabled))
     catalogue = catalogue.merge(_model_usage(selection, scores), on="Model", how="left")
 
+    decisions = lock.save()
     manifest = mf.write_manifest(out_dir / "run_manifest.json", {
         "pipeline_version": __version__, "run_id": run_id, "run_date": run_date,
         "git": git, "packages": mf.package_versions(),
@@ -414,6 +512,12 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
         "reconciliation_method_chosen": recon_method,
         "point_estimate_used": point_estimate_used,
         "submitted_method": funnel_used,
+        "vintage_signal_used": vintage_used,
+        "calendar_effects_used": calendar_used,
+        "calendar_effects_log_coefficients": ({k: round(float(v), 4) for k, v in zip(cx.FEATURES, cal_final[T - 1])}
+                                              if cal_final.get(T - 1) is not None else {}),
+        "method_decisions": decisions.to_dict("records") if len(decisions) else [],
+        "vintage_signal_pct_latest": vintage_signal,
         "range_methods_chosen": ({f"{g} | {w}": m for g, w, m in range_test.loc[range_test["Chosen"], ["Group", "Window", "Method"]]
                                   .drop_duplicates(["Group", "Window"]).itertuples(index=False)} if len(range_test) else {}),
         "overlay_source": overlay_source,
@@ -436,7 +540,7 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
                     series_status=panel.series_status, dq=panel.dq, scores=scores, selection=selection,
                     accuracy=accuracy, policy_comparison=policy_cmp, calibration=calib, block_calibration=block_calib, range_test=range_test, range_tested=range_tested, guardrails=guards, overlay_rules=rules,
                     catalogue=catalogue, failures=bt.failures, track_scorecard=track_sc,
-                    bias_test=bias_test, bias_estimates=bias_est, reconciliation_test=recon_test, point_estimate_test=smear_test, funnel_test=funnel_test, seasonal_index=sidx, seasonal_by_year=syear,
+                    bias_test=bias_test, bias_estimates=bias_est, reconciliation_test=recon_test, point_estimate_test=smear_test, funnel_test=funnel_test, vintage_test=vintage_test, decisions=decisions, calendar_test=calendar_test, data_revisions=data_rev, seasonal_index=sidx, seasonal_by_year=syear,
                     staffing=staffing, forecast_vs_actual=fva, fva_summary=fva_sum, human_scores=human_scores,
                     events=events, intake_arrivals=i_arr, intake_lead_profile=i_lead, intake_month_mix=i_mix,
                     manifest=manifest)
@@ -488,12 +592,16 @@ def _totals(fc: pd.DataFrame, bq: pd.DataFrame, history: pd.DataFrame, levels) -
         for k in iv.BLOCKS:
             gk = g.head(k)
             point, adj = float(gk["Forecast"].sum()), float(gk["Forecast_Adjusted"].sum())
+            pv = gk["Previous_Forecast"] if "Previous_Forecast" in gk else pd.Series(dtype=float)
+            prev_total = float(pv.sum()) if len(pv) and pv.notna().all() else np.nan
             ly_dates = gk["Date"] - pd.DateOffset(years=1)
             ly = float(sum(hist.get((*key, d), np.nan) for d in ly_dates))
             row = {"Level": key[0], "Country": key[1], "Region": key[2], "Metric": key[3],
                    "Label": g["Label"].iloc[0], "Window": f"Next {k} months",
                    "From": gk["Date"].min(), "To": gk["Date"].max(),
                    "Forecast": point, "Forecast_Adjusted": adj, "Same_Months_Last_Year": ly,
+                   "Previous_Forecast": prev_total,
+                   "Change_vs_Previous_Pct": 100 * (point / prev_total - 1) if prev_total and prev_total > 0 else np.nan,
                    "YoY_Pct": 100 * (point / ly - 1) if ly > 0 else np.nan,
                    "Reliability": g["Reliability"].iloc[0],
                    "Typical_Quarter_Error_Pct": g["Typical_Quarter_Error_Pct"].iloc[0]}
@@ -511,6 +619,21 @@ def _fiscal(d: pd.Timestamp, start: int):
     fy = d.year + (1 if d.month >= start else 0)
     q = (d.month - start) % 12 // 3 + 1
     return fy, q
+
+
+def hedge_weight(h: np.ndarray, horizon: int = 12) -> np.ndarray:
+    """Weight on 'same month last year': 0.5 next month, rising linearly to 1 at `horizon` months."""
+    return 0.5 + 0.5 * (np.asarray(h, dtype=float) - 1) / max(horizon - 1, 1)
+
+
+def _hedge(frame: pd.DataFrame, preds: pd.DataFrame, ids: set, benchmark: str) -> pd.DataFrame:
+    keys = [c for c in ("node_id", "o", "h") if c in frame.columns and c in preds.columns]
+    sn = preds[(preds["Model"] == benchmark) & preds["node_id"].isin(ids)][keys + ["Pred"]].rename(columns={"Pred": "_SN"})
+    out = frame.merge(sn, on=keys, how="left")
+    m = out["node_id"].isin(ids) & out["_SN"].notna()
+    w = hedge_weight(out.loc[m, "h"].to_numpy())
+    out.loc[m, "Pred"] = w * out.loc[m, "_SN"] + (1 - w) * out.loc[m, "Pred"]
+    return out.drop(columns="_SN")[frame.columns]
 
 
 def _periods(fc: pd.DataFrame, history: pd.DataFrame, fy_start: int, bq: Optional[pd.DataFrame] = None,

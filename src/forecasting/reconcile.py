@@ -49,11 +49,35 @@ def shrink_covariance(E: np.ndarray) -> np.ndarray:
     return lam * np.diag(np.diag(S)) + (1 - lam) * S
 
 
+def region_shares(S: np.ndarray, b_ids: List[str], last12: dict) -> np.ndarray:
+    """Each region's share of its country over the last 12 realised months (equal split if no history)."""
+    n_agg = S.shape[0] - S.shape[1]
+    v = np.array([max(float(last12.get(b, 0.0)), 0.0) for b in b_ids])
+    sh = np.full(len(b_ids), np.nan)
+    for i in range(1, n_agg):                          # country rows (row 0 = organisation)
+        m = S[i] == 1
+        tot = v[m].sum()
+        sh[m] = v[m] / tot if tot > 0 else 1.0 / m.sum()
+    return sh
+
+
 def reconcile(yhat: np.ndarray, S: np.ndarray, method: str, var: Optional[np.ndarray] = None,
-              E: Optional[np.ndarray] = None) -> Tuple[np.ndarray, str]:
-    """yhat: (n_nodes, H) base forecasts in the row order of S. Returns (y_tilde, method_used)."""
+              E: Optional[np.ndarray] = None, shares: Optional[np.ndarray] = None) -> Tuple[np.ndarray, str]:
+    """yhat: (n_nodes, H) base forecasts in the row order of S. Returns (y_tilde, method_used).
+    middle_out: each country keeps its own forecast, split to its regions by `shares`; regions of
+    single-region countries keep their own; the organisation is the sum."""
     n_agg = S.shape[0] - S.shape[1]
     used = method
+    if method == "middle_out":
+        if shares is None:
+            used = "bottom_up"
+        else:
+            b = yhat[n_agg:].copy()
+            for i in range(1, n_agg):
+                m = S[i] == 1
+                b[m] = yhat[i][None, :] * shares[m][:, None] if b.ndim == 2 else yhat[i] * shares[m]
+            b = np.clip(b, 0.0, None)
+            return S @ b, used
     if method == "mint_shrink" and (E is None or np.isnan(E).any() or E.shape[0] < 12):
         used = "wls_var"
     if used == "bottom_up":
@@ -90,7 +114,7 @@ def node_variances(ids: List[str], resid_h1: pd.DataFrame, level_hint: pd.Series
     return np.array(out)
 
 
-METHODS = ("none", "bottom_up", "wls_var", "mint_shrink")
+METHODS = ("none", "bottom_up", "wls_var", "mint_shrink", "middle_out")
 
 
 def walk_forward_test(honest: pd.DataFrame, comb: pd.DataFrame, nodes: pd.DataFrame, return_detail: bool = False):
@@ -103,12 +127,13 @@ def walk_forward_test(honest: pd.DataFrame, comb: pd.DataFrame, nodes: pd.DataFr
         return (pd.DataFrame(), pd.DataFrame()) if return_detail else pd.DataFrame()
     meta = nodes.set_index("node_id")
     resid = comb[comb["h"] == 1].assign(e=lambda d: d["Actual"] - d["Pred"])
+    act_t = comb.drop_duplicates(["node_id", "t"]).pivot_table(index="t", columns="node_id", values="Actual")
     out = []
     for metric in ("Received", "Submitted"):
         mn = nodes[(nodes["Metric"] == metric) & (nodes["Status"] == "Mature")]
         if mn.empty:
             continue
-        S, ids, _ = summing_matrix(mn)
+        S, ids, b_ids = summing_matrix(mn)
         h_m = honest[honest["node_id"].isin(ids)]
         for (e, h), g in h_m.groupby(["o", "h"]):
             g = g.set_index("node_id").reindex(ids)
@@ -119,11 +144,13 @@ def walk_forward_test(honest: pd.DataFrame, comb: pd.DataFrame, nodes: pd.DataFr
             past = resid[resid["t"] <= e]
             var = node_variances(ids, past, pd.Series(yhat[:, 0], index=ids))
             E = past.pivot_table(index="o", columns="node_id", values="e").reindex(columns=ids).dropna().to_numpy()
+            win = act_t.loc[(act_t.index <= e) & (act_t.index > e - 12)]
+            sh = region_shares(S, b_ids, win.sum().to_dict())
             for method in METHODS:
                 if method == "none":
                     yt, used = yhat, "none"
                 else:
-                    yt, used = reconcile(yhat, S, method, var=var, E=E if len(E) else None)
+                    yt, used = reconcile(yhat, S, method, var=var, E=E if len(E) else None, shares=sh)
                 for i, nid in enumerate(ids):
                     out.append((nid, metric, meta.loc[nid, "Level"], method, used, e, h, float(yt[i, 0]), float(act[i])))
     if not out:
@@ -144,12 +171,13 @@ def reconcile_backtest(comb: pd.DataFrame, nodes: pd.DataFrame, method: str) -> 
     only one-step errors realised by o (targets <= o), exactly as in walk_forward_test. Mature series only.
     """
     resid = comb[comb["h"] == 1].assign(e=lambda d: d["Actual"] - d["Pred"])
+    act_t = comb.drop_duplicates(["node_id", "t"]).pivot_table(index="t", columns="node_id", values="Actual")
     parts = []
     for metric in ("Received", "Submitted"):
         mn = nodes[(nodes["Metric"] == metric) & (nodes["Status"] == "Mature")]
         if mn.empty:
             continue
-        S, ids, _ = summing_matrix(mn)
+        S, ids, b_ids = summing_matrix(mn)
         cm = comb[comb["node_id"].isin(ids)]
         for (o, h), g in cm.groupby(["o", "h"]):
             gi = g.set_index("node_id").reindex(ids)
@@ -159,7 +187,9 @@ def reconcile_backtest(comb: pd.DataFrame, nodes: pd.DataFrame, method: str) -> 
             past = resid[resid["t"] <= o]
             var = node_variances(ids, past, pd.Series(yhat[:, 0], index=ids))
             E = past.pivot_table(index="o", columns="node_id", values="e").reindex(columns=ids).dropna().to_numpy()
-            yt, _ = reconcile(yhat, S, method, var=var, E=E if len(E) else None)
+            win = act_t.loc[(act_t.index <= o) & (act_t.index > o - 12)]
+            yt, _ = reconcile(yhat, S, method, var=var, E=E if len(E) else None,
+                              shares=region_shares(S, b_ids, win.sum().to_dict()))
             out = gi.reset_index()
             out["Pred"] = yt[:, 0]
             parts.append(out)
@@ -167,6 +197,27 @@ def reconcile_backtest(comb: pd.DataFrame, nodes: pd.DataFrame, method: str) -> 
         return comb
     res = pd.concat(parts, ignore_index=True)
     return res[comb.columns]
+
+
+def quarter_errors(detail: pd.DataFrame, k: int = 3) -> pd.DataFrame:
+    """Median abs % error of next-k-month totals per metric x level x method (the decision metric)."""
+    if detail is None or detail.empty:
+        return pd.DataFrame()
+    d = detail[detail["h"] <= k]
+    full = d.groupby(["node_id", "Method", "o"])["h"].transform("nunique") == k
+    q = d[full].groupby(["node_id", "Metric", "Level", "Method", "o"])[["Pred", "Actual"]].sum().reset_index()
+    q = q[q["Actual"] > 0]
+    q["APE"] = 100 * (q["Pred"] - q["Actual"]).abs() / q["Actual"]
+    return q.groupby(["Metric", "Level", "Method"])["APE"].median().rename("Quarter_Error_Pct").reset_index()
+
+
+def choose_method_quarter(detail: pd.DataFrame, candidates=("bottom_up", "wls_var", "mint_shrink", "middle_out")) -> str:
+    """Method with the lowest next-quarter error averaged over metric x level (each level counts equally)."""
+    q = quarter_errors(detail)
+    q = q[q["Method"].isin(candidates)] if len(q) else q
+    if q.empty:
+        return "bottom_up"
+    return str(q.groupby("Method")["Quarter_Error_Pct"].mean().idxmin())
 
 
 def choose_method(test: pd.DataFrame, candidates=("bottom_up", "wls_var", "mint_shrink")) -> str:

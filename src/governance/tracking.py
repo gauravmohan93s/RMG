@@ -26,6 +26,22 @@ def _read(path: Path) -> pd.DataFrame:
     return pd.DataFrame(columns=KEEP)
 
 
+def previous_forecast(path: Path, last_actual: pd.Timestamp) -> pd.DataFrame:
+    """What the most recent EARLIER month's run (actuals to an earlier month) forecast for each node x
+    target month: KEYS + Previous_Forecast, Previous_Run_Date. Empty if there is no earlier month."""
+    hist = _read(Path(path))
+    if hist.empty:
+        return pd.DataFrame(columns=KEYS + ["Previous_Forecast", "Previous_Run_Date"])
+    la = pd.to_datetime(hist["Last_Actual_Month"])
+    earlier = hist[la < pd.Timestamp(last_actual)]
+    if earlier.empty:
+        return pd.DataFrame(columns=KEYS + ["Previous_Forecast", "Previous_Run_Date"])
+    last_run = pd.to_datetime(earlier["Run_Date"]).max()
+    p = earlier[pd.to_datetime(earlier["Run_Date"]) == last_run][KEYS + ["Forecast"]].copy()
+    p["Date"] = pd.to_datetime(p["Date"])
+    return p.rename(columns={"Forecast": "Previous_Forecast"}).assign(Previous_Run_Date=last_run)
+
+
 def log_run(fc: pd.DataFrame, run_id: str, run_date: str, version: str, last_actual: pd.Timestamp,
             path: Path) -> pd.DataFrame:
     cur = fc.copy()

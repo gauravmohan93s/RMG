@@ -58,6 +58,27 @@ executive-readable brief, and region-specific staffing productivity.
 - **Diagnosis of under-prediction**: the models lag turning points (+9% in the 2024–25 fall, −6 to −17%
   in the 2025–26 surge). A momentum-gap correction was tested and rejected. See
   `docs/experiments/2026-09-28_bias_and_funnel.md`.
+- **Hedge replaces the hard fallback**: series where the model average lost to "same month last year"
+  now publish a horizon-weighted hedge (last-year weight 0.5 next month, rising to 1 at 12 months).
+  Tested on those 11 series: next-quarter miss 14.3 → 11.6%, 6 months 14.4 → 10.9%.
+- **Improvement round** (`docs/experiments/2026-09-28_improvement_round.md`):
+  - calendar and festival effects per 26th–25th cycle (working days, Diwali, Holi, Eid) for receipts;
+  - quarterly lock of method decisions (Method Decisions sheet);
+  - extract snapshots with late-entry revision measurement;
+  - "vs last month's forecast" revisions in the pack;
+  - pre-filled market input form (`Reports/Human_Inputs_Form_<date>.xlsx`);
+  - tested and rejected: accuracy-weighted average, middle-out adding-up, revision damping.
+- **One decision rule for every component**: the overlay and the reconciliation method are now also
+  judged on next-quarter totals per level, adopted only if at least 3% better. The overlay's old 1%
+  monthly-WAPE gate flipped between runs and moved the organisation forecast by 12% with identical data.
+  On quarter totals the overlay wins decisively (countries 18.8 → 14.6%), and bottom-up reconciliation
+  beats wls_var (level-average 16.9 vs 17.4%).
+- **Direction signal from the latest vintages** (`src/forecasting/vintage.py`): the last 3 full
+  quarters plus the latest 2 partial ones, read at country level and applied at half strength to
+  receipts. Walk-forward next-quarter miss: countries 18.4 → 14.2%, regions 22.3 → 19.2%, organisation
+  unchanged. Re-tested each run. Pack page 3 "Direction check" shows the vintage misses.
+- **Proof page** (pack page 2): the forecast made 3 months ago vs what happened, per destination,
+  regenerated every month.
 - **Fiscal-year outlook with range**: actual to date + forecast remainder, where only the remainder is
   uncertain, so the range narrows every month. On pack page 1 and every country page.
 - **Health check**: four acceptance criteria fixed in advance, scored on tested and live forecasts, in

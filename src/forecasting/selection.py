@@ -26,12 +26,14 @@ import pandas as pd
 
 MIN_KNOWN_PAIRS = 12
 H_BUCKETS = {"1-3": (1, 3), "4-6": (4, 6), "7-12": (7, 12)}
-POLICIES = ("mean_all", "mean_screened", "top_k")
+POLICIES = ("mean_all", "mean_screened", "top_k", "weighted")
+WEIGHT_SHRINK = 0.5      # weighted policy: halfway between inverse-error weights and equal weights
 METHOD_LABELS = {
     "Policy": "Selected method (walk-forward)",
     "Mean_All": "Equal-weight mean of all models",
     "Mean_Screened": "Mean of models beating benchmark",
     "Top_K": "Top-k combination",
+    "Weighted": "Accuracy-weighted mean (shrunk to equal)",
     "Best_Single": "Best single model",
     "Benchmark": "Seasonal naive (benchmark)",
 }
@@ -129,6 +131,16 @@ def combine(preds: pd.DataFrame, selected: pd.Series) -> pd.DataFrame:
     return m.groupby(keys, as_index=False).agg(agg)
 
 
+def inverse_error_weights(hb: pd.Series, shrink: float = WEIGHT_SHRINK) -> pd.Series:
+    """Weights proportional to 1 / horizon-balanced MAE, shrunk toward equal weights (robust to noise)."""
+    inv = 1.0 / hb.replace(0, np.nan)
+    inv = inv.fillna(0.0)
+    if inv.sum() <= 0:
+        return pd.Series(1.0 / len(hb), index=hb.index)
+    w = inv / inv.sum()
+    return shrink * w + (1 - shrink) / len(hb)
+
+
 def honest_evaluation(preds: pd.DataFrame, benchmark: str, top_k: int, must_beat: bool,
                       n_eval_origins: int, policy: str = "mean_all") -> pd.DataFrame:
     """Walk-forward replay of every policy (see module docstring). `Policy` = the configured one."""
@@ -145,6 +157,7 @@ def honest_evaluation(preds: pd.DataFrame, benchmark: str, top_k: int, must_beat
         ae = (wide.sub(act, axis=0)).abs()
         for e in origins[-n_eval_origins:]:
             known = (o_idx < e) & (t_idx <= e)
+            wts = pd.Series(1.0 / wide.shape[1], index=wide.columns)
             if known.sum() < MIN_KNOWN_PAIRS:
                 chosen, screened, best = [benchmark], [benchmark], benchmark
             else:
@@ -155,18 +168,22 @@ def honest_evaluation(preds: pd.DataFrame, benchmark: str, top_k: int, must_beat
                 chosen = _choose(tbl, benchmark, top_k, must_beat)
                 screened = _choose(tbl, benchmark, len(tbl), True)
                 best = tbl["Model"].iloc[0]
+                wts = inverse_error_weights(hb.reindex(wide.columns))
             at = o_idx == e
             w = wide[at]
             mean_all = w.mean(axis=1).to_numpy()
             top = w[chosen].mean(axis=1).to_numpy()
             scr = w[screened].mean(axis=1).to_numpy()
+            ww = w.notna().mul(wts, axis=1)
+            weighted = (w.fillna(0).mul(wts, axis=1).sum(axis=1) / ww.sum(axis=1).replace(0, np.nan)).to_numpy()
             out.append(pd.DataFrame({
                 "node_id": nid, "o": e, "h": h_idx[at], "t": t_idx[at],
                 "Actual": act[at].to_numpy(),
-                "Policy": {"mean_all": mean_all, "mean_screened": scr}.get(policy, top),
+                "Policy": {"mean_all": mean_all, "mean_screened": scr, "weighted": weighted}.get(policy, top),
                 "Mean_All": mean_all,
                 "Mean_Screened": scr,
                 "Top_K": top,
+                "Weighted": weighted,
                 "Best_Single": w[best].to_numpy(),
                 "Benchmark": w[benchmark].to_numpy(),
                 "Top_K_Models": " + ".join(chosen),
@@ -181,7 +198,7 @@ def policy_comparison(honest: pd.DataFrame, nodes: pd.DataFrame) -> pd.DataFrame
     meta = nodes.set_index("node_id")[["Level", "Metric"]]
     hz = honest.join(meta, on="node_id")
     hz["Bucket"] = pd.cut(hz["h"], [0, 3, 6, 12], labels=list(H_BUCKETS))
-    cols = [c for c in ("Mean_All", "Mean_Screened", "Top_K", "Best_Single", "Benchmark") if c in hz.columns]
+    cols = [c for c in ("Mean_All", "Mean_Screened", "Top_K", "Weighted", "Best_Single", "Benchmark") if c in hz.columns]
     rows = []
     for (lvl, met, b), g in hz.groupby(["Level", "Metric", "Bucket"], observed=True):
         den = g["Actual"].sum()
