@@ -51,6 +51,15 @@ executive-readable brief, and region-specific staffing productivity.
 - Experiment: long-horizon blend toward last year's level was **rejected** (no consistent gain), and
   12-month country misses of 34–42% were confirmed as real (policy shocks).
   See `docs/experiments/2026-09-27_long_horizon_and_ranges.md`.
+- **Funnel model for submissions** (`src/forecasting/funnel.py`): Submitted = recent conversion ×
+  receipts (actual to date, forecast after). It competes walk-forward with the model forecast and a
+  blend, and is adopted only if at least 3% better. On 2026-09 data it won at every level (next-quarter
+  miss: organisation 10.5 → 9.1%, countries 20.6 → 18.9%, regions 23.1 → 20.9%).
+- **Diagnosis of under-prediction**: the models lag turning points (+9% in the 2024–25 fall, −6 to −17%
+  in the 2025–26 surge). A momentum-gap correction was tested and rejected. See
+  `docs/experiments/2026-09-28_bias_and_funnel.md`.
+- **Fiscal-year outlook with range**: actual to date + forecast remainder, where only the remainder is
+  uncertain, so the range narrows every month. On pack page 1 and every country page.
 - **Health check**: four acceptance criteria fixed in advance, scored on tested and live forecasts, in
   the pack and in Excel.
 - **Data safeguard**: the latest month is flagged CRITICAL if its year-on-year change collapses or

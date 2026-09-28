@@ -44,7 +44,7 @@ def _styles() -> Dict[str, ParagraphStyle]:
         "title": ParagraphStyle("t", fontName="Helvetica-Bold", fontSize=16, leading=19, textColor=INK),
         "meta": ParagraphStyle("m", fontName="Helvetica", fontSize=7.5, leading=9.5, textColor=INK2, alignment=2),
         "tl": ParagraphStyle("tl", fontName="Helvetica", fontSize=7.3, leading=9, textColor=INK2),
-        "tv": ParagraphStyle("tv", fontName="Helvetica-Bold", fontSize=17, leading=20, textColor=INK),
+        "tv": ParagraphStyle("tv", fontName="Helvetica-Bold", fontSize=15.5, leading=18.5, textColor=INK),
         "ts": ParagraphStyle("ts", fontName="Helvetica", fontSize=7.3, leading=9.2, textColor=INK),
         "legend": ParagraphStyle("l", fontName="Helvetica", fontSize=8.5, leading=12, textColor=INK),
     }
@@ -133,7 +133,7 @@ def _tiles(res, level: str, country: str, S) -> Table:
     r12 = _tot(res, level, country, "Received", "Next 12 months")
     s12 = _tot(res, level, country, "Submitted", "Next 12 months")
     small = bool(r12) and r12.get("Forecast", 0) < 5000
-    w = (FULL_W - 0.4) / 5
+    w = (FULL_W - 0.5) / 6
 
     def vol(label, r):
         if not r:
@@ -156,10 +156,28 @@ def _tiles(res, level: str, country: str, S) -> Table:
     recent = ins.recent_yoy(res.history, level, country, "Received")
     trend = [f"forecast assumes <b>{_pct(r12.get('YoY_Pct'))}</b> for the next 12 months" if r12 else "",
              "if very different, confirm with the market"]
-    tiles = [vol(q_lab, r3), vol("Received · next 12 months", r12), vol("Submitted · next 12 months", s12),
+    tiles = [vol(q_lab, r3), _fy_tile(res, level, country, "Received", S, w, small),
+             vol("Received · next 12 months", r12), _fy_tile(res, level, country, "Submitted", S, w, small),
              _tile("Reliability", rel, rel_lines, S, w, accent=REL_BG.get(rel)),
              _tile("Market now: last 6 months vs a year earlier", _pct(recent), trend, S, w)]
-    return _row(tiles, [w + 0.08] * 5)
+    return _row(tiles, [w + 0.08] * 6)
+
+
+def _fy_tile(res, level: str, country: str, metric: str, S, w: float, small: bool) -> Table:
+    """Current fiscal year = actual to date + forecast for the rest; only the rest is uncertain."""
+    p = getattr(res, "periods", None)
+    if p is None or p.empty:
+        return _tile(f"{metric} · this fiscal year", "–", [], S, w)
+    x = p[(p["Level"] == level) & (p["Country"] == country) & (p["Region"] == TOTAL) & (p["Metric"] == metric)
+          & (p["Period_Type"] == "Fiscal year") & (p["Months_Forecast"] > 0)].sort_values("Period_Start")
+    if x.empty:
+        return _tile(f"{metric} · this fiscal year", "–", [], S, w)
+    r = x.iloc[0]
+    lines = [f"{_n(r['Actual_To_Date'], small)} done ({int(r['Months_Actual'])} m) + {_n(r['Forecast_Remaining'], small)} to come"]
+    if "Outlook_Lo80" in r and np.isfinite(r.get("Outlook_Lo80", np.nan)):
+        lines.append(f"Plan for <b>{_n(r['Outlook_Lo80'], small)} – {_n(r['Outlook_Hi80'], small)}</b>")
+    lines.append(f"{_pct(r['YoY_Pct'])} vs last fiscal year")
+    return _tile(f"{metric} · {r['Period']} outlook", _n(r["Outlook"], small), lines, S, w)
 
 
 def _month_strip(res, level: str, country: str, S) -> Table:

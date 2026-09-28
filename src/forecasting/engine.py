@@ -28,6 +28,7 @@ from ..analysis import seasonality as seas
 from ..analysis import signals as sig
 from ..analysis import intake as itk
 from . import bias_correction as bc
+from . import funnel as fn
 from . import guardrails as gr
 from . import intervals as iv
 from . import overlay as ov
@@ -73,6 +74,7 @@ class RunResult:
     bias_estimates: pd.DataFrame
     reconciliation_test: pd.DataFrame
     point_estimate_test: pd.DataFrame
+    funnel_test: pd.DataFrame
     seasonal_index: pd.DataFrame
     seasonal_by_year: pd.DataFrame
     staffing: pd.DataFrame
@@ -112,6 +114,7 @@ ARTEFACTS = {
     "bias_estimates": "Evaluation/statistical_overlay_estimates.csv",
     "reconciliation_test": "Evaluation/reconciliation_test.csv",
     "point_estimate_test": "Evaluation/point_estimate_test.csv",
+    "funnel_test": "Evaluation/submitted_funnel_test.csv",
     "seasonal_index": "Analysis/seasonal_index.csv",
     "seasonal_by_year": "Analysis/seasonal_by_year.csv",
     "staffing": "Analysis/staffing_calendar.csv",
@@ -226,6 +229,20 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
         comb_bt = comb_bt.assign(Pred=comb_bt["Pred"].to_numpy() * comb_bt["node_id"].map(f_now).fillna(1.0).to_numpy())
         honest = honest.assign(Policy=smear_honest)
     point_estimate_used = "mean (smearing-corrected)" if use_mean else "median (typical month)"
+
+    # funnel: submissions follow receipts (a leading indicator); adopted only if it wins walk-forward
+    Y_full = fn.full_series(panel)
+    funnel_test, funnel_var = fn.walk_forward_test(honest, tour, Y_full)
+    funnel_used = fn.decide(funnel_test)
+    if funnel_used != "model":
+        honest = honest.assign(Policy=funnel_var[funnel_used])
+        f_bt = fn.funnel_forecast(comb_bt, "Pred", Y_full)
+        comb_bt = comb_bt.assign(Pred=fn.variant(comb_bt, "Pred", f_bt, funnel_used))
+        b_o = base.assign(o=T - 1)
+        base["Pred"] = fn.variant(b_o, "Pred", fn.funnel_forecast(b_o, "Pred", Y_full), funnel_used).to_numpy()
+        m = selection["node_id"].str.startswith("Submitted|")
+        selection.loc[m, "Selection_Reason"] += (f" Submissions: '{funnel_used}' (recent conversion from receipts) "
+                                                 "replaced the model forecast after winning the walk-forward test.")
     refs = pd.DataFrame({nid: gr.references(panel.y[nid]) for nid in tour["node_id"]}).T
     guards = gr.plausibility(base, refs, settings.guardrails.min_ratio, settings.guardrails.max_ratio)
     for _, g in guards[guards["Guardrail_Triggered"]].iterrows():
@@ -353,7 +370,7 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
 
     # 9) summaries ──────────────────────────────────────────────────────────
     totals = _totals(fc, bq, panel.history, levels)
-    periods = _periods(fc, panel.history, settings.data.fin_year_start_month)
+    periods = _periods(fc, panel.history, settings.data.fin_year_start_month, bq, levels)
     accuracy = sel.accuracy_by_horizon(honest, bt.preds, nodes)
     scfg = settings.seasonality
     sidx, syear = seas.seasonal_indices(panel.history, scfg.high_threshold, scfg.low_threshold, scfg.years)
@@ -396,6 +413,7 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
         "reconciliation_method_used": recon_used,
         "reconciliation_method_chosen": recon_method,
         "point_estimate_used": point_estimate_used,
+        "submitted_method": funnel_used,
         "range_methods_chosen": ({f"{g} | {w}": m for g, w, m in range_test.loc[range_test["Chosen"], ["Group", "Window", "Method"]]
                                   .drop_duplicates(["Group", "Window"]).itertuples(index=False)} if len(range_test) else {}),
         "overlay_source": overlay_source,
@@ -418,7 +436,7 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
                     series_status=panel.series_status, dq=panel.dq, scores=scores, selection=selection,
                     accuracy=accuracy, policy_comparison=policy_cmp, calibration=calib, block_calibration=block_calib, range_test=range_test, range_tested=range_tested, guardrails=guards, overlay_rules=rules,
                     catalogue=catalogue, failures=bt.failures, track_scorecard=track_sc,
-                    bias_test=bias_test, bias_estimates=bias_est, reconciliation_test=recon_test, point_estimate_test=smear_test, seasonal_index=sidx, seasonal_by_year=syear,
+                    bias_test=bias_test, bias_estimates=bias_est, reconciliation_test=recon_test, point_estimate_test=smear_test, funnel_test=funnel_test, seasonal_index=sidx, seasonal_by_year=syear,
                     staffing=staffing, forecast_vs_actual=fva, fva_summary=fva_sum, human_scores=human_scores,
                     events=events, intake_arrivals=i_arr, intake_lead_profile=i_lead, intake_month_mix=i_mix,
                     manifest=manifest)
@@ -495,9 +513,14 @@ def _fiscal(d: pd.Timestamp, start: int):
     return fy, q
 
 
-def _periods(fc: pd.DataFrame, history: pd.DataFrame, fy_start: int) -> pd.DataFrame:
-    """Fiscal quarter / year outlook = actuals to date + forecast remainder, vs same period last year."""
+def _periods(fc: pd.DataFrame, history: pd.DataFrame, fy_start: int, bq: Optional[pd.DataFrame] = None,
+             levels=(80,)) -> pd.DataFrame:
+    """Fiscal quarter / year outlook = actuals to date + forecast remainder, vs same period last year.
+    Range: only the forecast remainder is uncertain. It uses the total-range of the smallest tested window
+    (3/6/12 months from now) that covers the remainder; months already actual add no uncertainty, so the
+    year-end range narrows every month as actuals arrive."""
     hist = history.set_index(["Level", "Country", "Region", "Metric", "Date"])["Actual"]
+    bqi = bq.set_index(["node_id", "k"]) if bq is not None and len(bq) else None
     first_fc, last_fc = fc["Date"].min(), fc["Date"].max()
     rows = []
     for key, g in fc.groupby(["Level", "Country", "Region", "Metric"], sort=False):
@@ -521,7 +544,17 @@ def _periods(fc: pd.DataFrame, history: pd.DataFrame, fy_start: int) -> pd.DataF
             fsum = float(f.loc[fcs, "Forecast"].sum())
             fadj = float(f.loc[fcs, "Forecast_Adjusted"].sum())
             ly = float(sum(hist.get((*key, d - pd.DateOffset(years=1)), np.nan) for d in ds))
-            rows.append({"Level": key[0], "Country": key[1], "Region": key[2], "Metric": key[3],
+            rng = {}
+            if bqi is not None and fcs:
+                n_end = (max(fcs).year - first_fc.year) * 12 + max(fcs).month - first_fc.month + 1
+                kk = next((k for k in iv.BLOCKS if k >= n_end), None)
+                src = g["Source_Node"].iloc[0] if "Source_Node" in g else None
+                if kk is not None and (src, kk) in bqi.index:
+                    qq = bqi.loc[(src, kk)]
+                    for L in levels:
+                        lo, hi = iv.apply_interval(np.array([fsum]), np.array([qq[f"q_lo{L}"]]), np.array([qq[f"q_hi{L}"]]))
+                        rng[f"Outlook_Lo{L}"], rng[f"Outlook_Hi{L}"] = a + float(lo[0]), a + float(hi[0])
+            rows.append({**rng, "Level": key[0], "Country": key[1], "Region": key[2], "Metric": key[3],
                          "Label": g["Label"].iloc[0], "Period": name, "Period_Type": kind,
                          "Period_Start": min(ds), "Months_Actual": len(act), "Months_Forecast": len(fcs),
                          "Actual_To_Date": a, "Forecast_Remaining": fsum, "Outlook": a + fsum,

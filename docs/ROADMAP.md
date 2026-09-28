@@ -44,7 +44,26 @@ metric for every model; nothing fitted on data after a forecast origin.
 | 7 | Human signals: `Human_Inputs` template (expected volumes + reason) recorded every run and scored; combined statistically once ≥6 months of track record exist |
 | 8 | Reports: fully labelled charts (seasonality heatmap, H/M/L profile, forecast vs actual, model league table); human-friendly Excel (plain-English headers, native charts, staffing calendar, grouped tabs) |
 
-## v2.2.0 — External drivers (primary goal: monthly volume accuracy)
+## v2.2.0 — Evidence-chosen ranges, deeper tests, funnel, monthly pack (in progress on feature/v2.1)
+- Shipped: evidence-chosen ranges, 24-origin walk-forward, health check, funnel model for submissions,
+  fiscal-year outlook with narrowing range, monthly visual pack + country PDFs.
+
+## v2.3.0 — Stage (pipeline) data: the lever for turning points
+Monthly counts by country × region of applications crossing each stage, in the same 26th–25th cycle
+and SQL extract as Submitted:
+- Offers (conditional / unconditional)
+- Deposits paid
+- Country visa stages: CAS issued (UK), Funds / GS stage (Australia), AIP (New Zealand), I-20 (USA),
+  and the equivalents for other destinations.
+
+With these:
+1. **Stage conversion chain.** Each stage is forecast from the one before it with lagged conversion
+   rates, the same way as the v2.2 funnel for submissions.
+2. **Booking curve by intake.** Compare cumulative stage counts for an upcoming intake with the same
+   point last year, to see an intake running strong or weak months before the totals move.
+3. **Each signal must beat the current forecast walk-forward** before it is used.
+
+## v2.4.0 — External drivers
 - Intake extract and descriptive arrival view shipped in v2.1 (the forecast stays monthly).
 - Test the intake mix of recent months as a leading signal for the global ML models (keep only if it
   improves walk-forward accuracy).
@@ -52,7 +71,7 @@ metric for every model; nothing fitted on data after a forecast origin.
   approval rates); each must prove uplift in the rolling-origin harness before use.
 - Scenario engine: overlays as distributions rather than point multipliers.
 
-## v2.3.0 — Operations (renumbered from the original plan)
+## v2.5.0 — Operations (renumbered from the original plan)
 - Scheduled monthly run after the 25th-cycle close; e-mail/Teams notification with the PDF brief.
 - Drift monitor: alert when realised 80% coverage leaves 70–90% or WAPE degrades.
 - Optional: statsforecast / hierarchicalforecast back-ends for speed at larger scale.

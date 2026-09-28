@@ -185,14 +185,22 @@ python run_pipeline.py forecast --run-date 2026-09-27
 python run_pipeline.py report   --run-date 2026-09-27   # rebuild reports from a saved run
 ```
 
-A run takes about 20 minutes (the 17-model rolling-origin backtest is the long step).
+A run takes about 25 minutes. The 17-model rolling-origin backtest over 36 origins is the long step.
+
+**Before sharing the pack, check two things:**
+1. **Page 1 has no red "DATA WARNING" banner.** A banner means the latest month looks partly loaded;
+   re-fetch before using the forecast.
+2. **Track-record page health checks.** Tested should show Pass. Live shows "Not yet" until 3 months
+   of published forecasts have been compared with actuals. Trust a use once Live passes for 3
+   consecutive months.
 
 ### Outputs (`Predictions/<run-date>/`)
 | Path | Contents |
 |---|---|
-| `Reports/RMG_Executive_Brief_<date>.pdf` | 3-page brief + country appendix |
+| `Reports/RMG_Monthly_Pack_<date>.pdf` | leadership pack: organisation, destinations, workload calendar, track record + health check, one page per destination |
+| `Reports/Countries/<Country>.pdf` | the same destination page as a separate file, for country heads |
 | `Reports/RMG_Forecast_<date>.xlsx` | planning sheets + all evidence sheets |
-| `Final_Forecast/final_forecast.csv` | every region, country and organisation × month, with 80/95% ranges |
+| `Final_Forecast/final_forecast.csv` | every region, country and organisation × month, with 50/80/95% ranges |
 | `Final_Forecast/totals_summary.csv`, `period_summary.csv` | next 3/6/12-month totals, fiscal quarters/years |
 | `Evaluation/*` | backtest predictions, model scores, selection evidence, policy comparison, calibration |
 | `Data/*` | series status, data-quality register, history used |

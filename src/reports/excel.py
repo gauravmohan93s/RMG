@@ -26,6 +26,8 @@ SHEET_GROUP = {
 FRIENDLY = {
     "Label": "Series", "Date": "Month", "Horizon": "Months ahead", "Forecast": "Forecast",
     "Lo50": "Most likely low (50%)", "Hi50": "Most likely high (50%)",
+    "Outlook_Lo80": "Outlook plan low (80%)", "Outlook_Hi80": "Outlook plan high (80%)",
+    "Outlook_Lo50": "Outlook most likely low", "Outlook_Hi50": "Outlook most likely high",
     "Lo80": "Plan low (80% range)", "Hi80": "Plan high (80% range)", "Lo95": "Low (95% range)", "Hi95": "High (95% range)",
     "Forecast_Adjusted": "Adjusted forecast", "Adjusted_Lo80": "Adjusted low (80%)", "Adjusted_Hi80": "Adjusted high (80%)",
     "Overlay_Multiplier": "Business adjustment (x)", "Base_Forecast": "Before reconciliation",
@@ -407,6 +409,13 @@ def write_workbook(res, path: Path) -> Path:
             note="Acceptance checks fixed in advance and scored every month. Tested = forecasts re-made for past months "
                  "with only the data then available; Live = published forecasts as their actuals arrive. Trust a use once "
                  "the live column passes for 3 consecutive months.")
+    ft = getattr(res, "funnel_test", None)
+    if ft is not None and len(ft):
+        ftw = ft.pivot_table(index="Level", columns="Variant", values="Quarter_Error_Pct").reset_index()
+        b.table("Submitted Funnel Test", ftw, formats={c: "pct_plain" for c in ftw.columns[1:]},
+                note="Walk-forward typical miss (%) on next-quarter submissions. model = time-series forecast; "
+                     "funnel = recent conversion rate x receipts (actual to date, forecast after); blend = average. "
+                     f"Used: '{res.manifest.get('submitted_method', 'model')}'.")
     rtest = getattr(res, "range_test", None)
     if rtest is not None and len(rtest):
         b.table("Range Method Test", rtest,
