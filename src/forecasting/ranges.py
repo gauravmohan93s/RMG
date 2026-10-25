@@ -104,6 +104,12 @@ class _Store:
 
 
 MIN_INDEPENDENT = 4    # k-month totals: own errors used only with >= 4 non-overlapping windows' worth
+LS_OWN_BLEND = True    # v2.2.1: blend own long-window spread into the location-scale estimate
+LS_PRIOR_N = 2.0       # weight of the pooled estimate, in independent windows
+# Tested on 2026-09 data (docs/experiments/2026-10-25_long_window_blend.md): better for the Region group
+# (interval score 12 m 5.27 -> 5.07, 6 m 3.26 -> 2.79, coverage unchanged), worse for countries and the
+# organisation (6 m 1.39 -> 1.50, country coverage 66% -> 57%). So it applies to the Region group only.
+LS_BLEND_GROUPS = ("Region",)
 
 
 def _own_enough(n: int, min_obs: int, overlap: int) -> bool:
@@ -156,7 +162,19 @@ def _inputs(store: "_Store", kind: str, nid: str, pool_key: tuple, key: int, at:
         s = store.ref_scale(nid, at)
         z = store.scaled_pool(pool_key, key, at)
         if np.isfinite(s) and s > 0 and len(z) >= 3:
-            return np.empty(0), np.empty(0), z, s, ov, "own quarter volatility x pooled shape"
+            mult, how = s, "own quarter volatility x pooled shape"
+            if LS_OWN_BLEND and len(own_r) >= 6 and group_of(pool_key[1]) in LS_BLEND_GROUPS:
+                # blend the series' OWN k-month spread with the location-scale spread, on the log scale,
+                # weighted by independent evidence (n/k windows vs LS_PRIOR_N). Series whose long totals are
+                # steadier than their quarters (e.g. last-year-anchored forecasts) are no longer overstated.
+                s_z = 1.4826 * float(np.median(np.abs(z - np.median(z))))
+                s_own = 1.4826 * float(np.median(np.abs(own_r - np.median(own_r))))
+                if s_z > 0 and s_own > 0:
+                    n_eff = len(own_r) / ov
+                    w = n_eff / (n_eff + LS_PRIOR_N)
+                    s_blend = float(np.exp(w * np.log(s_own) + (1 - w) * np.log(s_z * s)))
+                    mult, how = s_blend / s_z, "own long-window spread blended with pooled shape"
+            return np.empty(0), np.empty(0), z, mult, ov, how
     own = _own_enough(len(own_r), min_obs, ov)
     return own_r, own_o, pool_r, 1.0, ov, ("own errors" if own else "comparable series")
 

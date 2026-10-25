@@ -6,6 +6,11 @@ Two incremental extracts (only fully closed, not-yet-fetched months are queried)
                                -> the forecasting input (unchanged)
   monthly_intake_summary.xlsx  ReportMonth, CountryId, TagGroupID, Intake, InYear, Received/Submitted apps
                                -> descriptive intake view (which intake each month's applications target)
+  monthly_stage_summary.xlsx   ReportMonth, CountryId, TagGroupID, StageGroup, Apps (v2.3, off until
+                               STAGE_GROUPS is filled): applications reaching each later stage (offer,
+                               deposit, visa document...) for the FIRST time in the cycle
+
+Find the stage IDs first:  python fetch_data.py --discover-stages   (writes stage_discovery.xlsx)
 
 Credentials come ONLY from environment variables (or a local, git-ignored `.env` file in the
 repo root): DB_SERVER, DB_NAME, DB_USERNAME, DB_PASSWORD. Nothing secret is stored in code.
@@ -38,6 +43,18 @@ COUNTRY_SUBMITTED_STAGES = {
     #       2: [4,81],
 }
 DEFAULT_SUBMITTED_STAGES = [4, 81]
+
+# Later stages to extract (v2.3). Fill the ApplicationStageId lists from stage_discovery.xlsx.
+# "*" = all countries; a CountryId key overrides "*" for that country (country-specific visa documents).
+# Leave a group empty to skip it. Nothing is fetched while every list is empty.
+STAGE_GROUPS = {
+    "Offer":        {"*": []},          # conditional / unconditional offer
+    "Deposit":      {"*": []},          # deposit / tuition fee paid
+    "Visa_Document": {"*": []},         # e.g. {<UK CountryId>: [CAS id], <Australia>: [Funds/COE id],
+                                        #       <New Zealand>: [AIP id], <USA>: [I-20 id]}
+    "Visa_Outcome": {"*": []},          # visa granted
+}
+STAGE_OUTPUT_PATH = Path(os.environ.get("RMG_STAGE_OUTPUT_PATH", str(DATA_ROOT / "monthly_stage_summary.xlsx")))
 
 
 # -----------------------------------------------------------
@@ -174,6 +191,94 @@ ORDER BY CountryId, TagGroupID, Intake, InYear;
 """
 
 
+def _stage_groups_active(groups=None) -> dict:
+    groups = STAGE_GROUPS if groups is None else groups
+    return {g: {k: v for k, v in m.items() if v} for g, m in groups.items() if any(m.values())}
+
+
+def _stage_case(groups) -> str:
+    """CASE expression mapping (CountryId, ApplicationStageId) -> StageGroup; country keys before '*'."""
+    whens = []
+    for g, m in groups.items():
+        for cid, ids in m.items():
+            if cid == "*":
+                continue
+            whens.append(f"WHEN avs.CountryId = {int(cid)} AND ah.ApplicationStageId IN ({','.join(str(int(i)) for i in ids)}) "
+                         f"THEN '{g}'")
+        if m.get("*"):
+            excl = [int(c) for c in m if c != "*"]
+            cond = f"avs.CountryId NOT IN ({','.join(map(str, excl))}) AND " if excl else ""
+            whens.append(f"WHEN {cond}ah.ApplicationStageId IN ({','.join(str(int(i)) for i in m['*'])}) THEN '{g}'")
+    return "CASE " + " ".join(whens) + " END"
+
+
+def build_stage_sql(start_dt, end_dt, submitted_stages_dict, default_stages, report_month, groups=None):
+    """Applications reaching each stage group for the FIRST time inside the 26->25 window (an application
+    that re-enters a stage later is not counted twice)."""
+    s = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+    e = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+    grp = _stage_case(_stage_groups_active(groups))
+    return f"""
+WITH
+  StageEvents AS (
+    SELECT avs.CountryId, avs.TagGroupID, ah.AcknowledgementId, {grp} AS StageGroup,
+           MIN(DATEADD(MINUTE,330,ah.ChangedOn)) AS FirstReached
+    FROM ApplicationHistory ah
+    JOIN Application_View_Staff avs ON ah.AcknowledgementId = avs.AcknowledgementId
+    WHERE avs.CountryId IS NOT NULL AND {grp} IS NOT NULL
+      AND DATEADD(MINUTE,330,ah.ChangedOn) <= '{e}'   -- first reach up to the cycle end
+    GROUP BY avs.CountryId, avs.TagGroupID, ah.AcknowledgementId, {grp}
+  )
+SELECT '{report_month}' AS ReportMonth, CountryId, TagGroupID, StageGroup,
+       COUNT(DISTINCT AcknowledgementId) AS Apps
+FROM StageEvents
+WHERE FirstReached BETWEEN '{s}' AND '{e}'
+GROUP BY CountryId, TagGroupID, StageGroup
+ORDER BY CountryId, TagGroupID, StageGroup;
+"""
+
+
+STAGE_DISCOVERY_SQL = """
+-- read-only: which stage IDs are in use (last 12 months), with names if a stage master table exists
+SELECT ah.ApplicationStageId, COUNT(DISTINCT ah.AcknowledgementId) AS Apps_Last_12m,
+       MIN(DATEADD(MINUTE,330,ah.ChangedOn)) AS First_Seen, MAX(DATEADD(MINUTE,330,ah.ChangedOn)) AS Last_Seen
+FROM ApplicationHistory ah
+WHERE ah.ChangedOn >= DATEADD(MONTH,-12,GETDATE())
+GROUP BY ah.ApplicationStageId
+ORDER BY Apps_Last_12m DESC;
+"""
+
+STAGE_TABLES_SQL = """
+SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_NAME LIKE '%Stage%' ORDER BY TABLE_NAME, ORDINAL_POSITION;
+"""
+
+
+def discover_stages(engine, out_path: Path = DATA_ROOT / "stage_discovery.xlsx") -> Path:
+    """Stage IDs in use + candidate stage master tables, to fill STAGE_GROUPS."""
+    used = execute_query(STAGE_DISCOVERY_SQL, engine)
+    tables = execute_query(STAGE_TABLES_SQL, engine)
+    names = pd.DataFrame()
+    for (schema, table), cols in tables.groupby(["TABLE_SCHEMA", "TABLE_NAME"]):
+        c = set(cols["COLUMN_NAME"])
+        idc = next((x for x in ("ApplicationStageId", "StageId", "Id") if x in c), None)
+        namec = next((x for x in ("StageName", "Name", "Description", "Title") if x in c), None)
+        if idc and namec:
+            try:
+                names = execute_query(f"SELECT {idc} AS ApplicationStageId, {namec} AS StageName "
+                                      f"FROM [{schema}].[{table}]", engine).assign(Source=f"{schema}.{table}")
+                break
+            except Exception as exc:                        # noqa: BLE001 - try the next candidate table
+                print(f"  (could not read {schema}.{table}: {exc})")
+    if len(names):
+        used = used.merge(names, on="ApplicationStageId", how="left")
+    with pd.ExcelWriter(out_path) as w:
+        used.to_excel(w, sheet_name="Stages_In_Use", index=False)
+        tables.to_excel(w, sheet_name="Stage_Tables", index=False)
+    print(f"✅ Stage discovery written to {out_path}: fill STAGE_GROUPS in fetch_data.py from it.")
+    return out_path
+
+
 def execute_query(sql, engine):
     t0 = datetime.now()
     df = pd.read_sql(sql, engine)
@@ -255,7 +360,16 @@ def main():
     if FETCH_INTAKE:
         fetch_missing(engine, build_intake_sql, INTAKE_OUTPUT_PATH, ["CountryId", "TagGroupID", "Intake", "InYear"],
                       start_date, end_date, "intake")
+    if _stage_groups_active():
+        fetch_missing(engine, build_stage_sql, STAGE_OUTPUT_PATH, ["CountryId", "TagGroupID", "StageGroup"],
+                      start_date, end_date, "stages")
+    else:
+        print("ℹ️  [stages] STAGE_GROUPS is empty: stage extract skipped (run --discover-stages first).")
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    if "--discover-stages" in sys.argv:
+        discover_stages(make_engine())
+    else:
+        main()

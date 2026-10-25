@@ -61,6 +61,23 @@ executive-readable brief, and region-specific staffing productivity.
 - **Hedge replaces the hard fallback**: series where the model average lost to "same month last year"
   now publish a horizon-weighted hedge (last-year weight 0.5 next month, rising to 1 at 12 months).
   Tested on those 11 series: next-quarter miss 14.3 → 11.6%, 6 months 14.4 → 10.9%.
+- **Executive Outcomes folder**: every `all` run publishes the pack, the country PDFs, the workbook and
+  the input form to `RMG Calculations/Outcomes/<YYYY-MM> Forecast Pack/` (kept) and `Outcomes/Latest/`
+  (replaced each month) (`src/reports/publish.py`, `run_pipeline.py publish`).
+- **Country input forms** (`src/reports/forms.py`):
+  - `make-forms` writes one Excel file per destination (Staffing + Market_Inputs sheets) and runs at the
+    end of every `all` run;
+  - `collect-forms` validates the returned files, backs up `Settings.xlsx` and writes the
+    `Staffing_Productivity` and `Human_Inputs` sheets;
+  - a staffing rate can be given directly, or derived from current headcount.
+- **Stage data, prepared** (`fetch_data.py`):
+  - `--discover-stages` lists the stage IDs in use (read-only);
+  - `STAGE_GROUPS` (offer, deposit, visa document, visa outcome; country-specific overrides) feeds a
+    first-reach-per-cycle extract `monthly_stage_summary.xlsx`;
+  - skipped until the IDs are filled in.
+- **12-month ranges for single-region destinations** (Europe, Asia, ...): own long-window spread blended
+  with the pooled estimate, for the Region group only (tested: better there, worse for countries).
+  Europe's 12-month range −49%/+96% → −42%/+73%. See `docs/experiments/2026-10-25_long_window_blend.md`.
 - **Improvement round** (`docs/experiments/2026-09-28_improvement_round.md`):
   - calendar and festival effects per 26th–25th cycle (working days, Diwali, Holi, Eid) for receipts;
   - quarterly lock of method decisions (Method Decisions sheet);

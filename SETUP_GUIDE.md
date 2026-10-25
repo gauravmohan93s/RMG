@@ -179,10 +179,11 @@ python -m pytest                      # 59 tests: leakage, intervals, models, se
 Run once a month **after the 25th** (the reporting cycle closes on the 25th):
 
 ```bash
-python run_pipeline.py all                     # fetch -> transform -> forecast -> report
+python run_pipeline.py all                     # fetch -> transform -> forecast -> report -> publish
 python run_pipeline.py all --skip-fetch        # reuse the current extract
 python run_pipeline.py forecast --run-date 2026-09-27
 python run_pipeline.py report   --run-date 2026-09-27   # rebuild reports from a saved run
+python run_pipeline.py publish  --run-date 2026-09-27   # copy a run's reports to Outcomes/
 ```
 
 A run takes about 25 minutes. The 17-model rolling-origin backtest over 36 origins is the long step.
@@ -193,6 +194,41 @@ A run takes about 25 minutes. The 17-model rolling-origin backtest over 36 origi
 2. **Track-record page health checks.** Tested should show Pass. Live shows "Not yet" until 3 months
    of published forecasts have been compared with actuals. Trust a use once Live passes for 3
    consecutive months.
+
+### Country input forms (staffing rates and market inputs)
+Every `all` run also writes `RMG Calculations/Forms/<YYYY-MM>/To_Send/<Country>.xlsx`, one per destination:
+- **Staffing:** applications per counsellor per month per region, or just the current headcount.
+- **Market_Inputs:** the next 3 months; expected volume where the market lead disagrees with the model,
+  with a reason.
+
+Send each file to its country lead and save the returned files in `Forms/<YYYY-MM>/Returned/`, then run:
+
+```bash
+python run_pipeline.py collect-forms
+```
+
+`Settings.xlsx` is backed up first, then its `Staffing_Productivity` and `Human_Inputs` sheets are updated.
+The next run uses them.
+
+### Stage data (offers, deposits, visa documents): one-time setup
+
+```bash
+python fetch_data.py --discover-stages
+```
+
+This writes `stage_discovery.xlsx` with the stage IDs in use and their names. Fill `STAGE_GROUPS` in
+`fetch_data.py` from it; the monthly fetch then also builds `monthly_stage_summary.xlsx`.
+
+### Executive outputs (`RMG Calculations/Outcomes/`)
+Every `all` run publishes the reports for executives (no evidence files):
+
+| Folder | Contents |
+|---|---|
+| `Outcomes/<YYYY-MM> Forecast Pack/` | that month's pack, country PDFs, workbook and input form, plus a README; kept permanently |
+| `Outcomes/Latest/` | always the newest pack (replaced each month): the link to share with leadership |
+
+The folder is named after the first forecast month (actuals to September 2026 = `2026-10 Forecast Pack`).
+Override the location with `RMG_OUTCOMES_DIR`.
 
 ### Outputs (`Predictions/<run-date>/`)
 | Path | Contents |
