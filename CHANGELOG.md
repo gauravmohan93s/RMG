@@ -3,6 +3,22 @@
 All notable changes are recorded here. Format: [Keep a Changelog](https://keepachangelog.com/);
 versioning: [SemVer](https://semver.org/) as defined in `docs/ROADMAP.md`.
 
+## [2.2.1] — 2026-10-25
+
+### Added
+- `transform-data` also maps the stage extract to `stage_final_summary.xlsx` (skipped until
+  `STAGE_GROUPS` is filled).
+
+### Changed
+- README and METHODOLOGY brought up to date with every v2.2 component (hedge, funnel, direction signal,
+  calendar effects, decision rule and quarterly lock, snapshots, forms, publishing); ROADMAP v2.3 lists
+  what is prepared and what remains for stage data.
+
+### Data note
+- `Settings.xlsx` was edited on 2026-10-22: a few countries moved from "Southeast & Central Asia" to
+  "Asia" and "Central & Eastern Europe". The largest effect is 22 applications in a month between these
+  groups; organisation totals are unchanged. Runs from October 2026 use the new grouping.
+
 ## [2.2.0] — 2026-09-27
 
 Requested: ranges that support decisions, reliability that matches the published numbers, an

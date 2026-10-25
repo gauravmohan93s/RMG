@@ -44,24 +44,27 @@ metric for every model; nothing fitted on data after a forecast origin.
 | 7 | Human signals: `Human_Inputs` template (expected volumes + reason) recorded every run and scored; combined statistically once ≥6 months of track record exist |
 | 8 | Reports: fully labelled charts (seasonality heatmap, H/M/L profile, forecast vs actual, model league table); human-friendly Excel (plain-English headers, native charts, staffing calendar, grouped tabs) |
 
-## v2.2.0 — Evidence-chosen ranges, deeper tests, funnel, monthly pack (in progress on feature/v2.1)
+## v2.2.0 / v2.2.1 — Evidence-chosen ranges, deeper tests, funnel, monthly pack (released 2026-10-25)
 - Shipped: evidence-chosen ranges, 24-origin walk-forward, health check, funnel model for submissions,
   fiscal-year outlook with narrowing range, monthly visual pack + country PDFs.
 
 ## v2.3.0 — Stage (pipeline) data: the lever for turning points
-Monthly counts by country × region of applications crossing each stage, in the same 26th–25th cycle
-and SQL extract as Submitted:
-- Offers (conditional / unconditional)
-- Deposits paid
-- Country visa stages: CAS issued (UK), Funds / GS stage (Australia), AIP (New Zealand), I-20 (USA),
-  and the equivalents for other destinations.
+**Prepared in v2.2.x (code ready, not yet run against the database):**
+- `python fetch_data.py --discover-stages` lists the stage IDs in use (read-only).
+- `STAGE_GROUPS` in `fetch_data.py` defines offer, deposit, visa document and visa outcome, with
+  country-specific IDs for CAS (UK), Funds/COE (Australia), AIP (NZ) and I-20 (USA).
+- The monthly fetch writes `monthly_stage_summary.xlsx`, counting each application the first time it
+  reaches a stage in the 26th–25th cycle.
+- `transform-data` writes `stage_final_summary.xlsx` (Country Grouped / Name of Region).
 
-With these:
-1. **Stage conversion chain.** Each stage is forecast from the one before it with lagged conversion
-   rates, the same way as the v2.2 funnel for submissions.
-2. **Booking curve by intake.** Compare cumulative stage counts for an upcoming intake with the same
-   point last year, to see an intake running strong or weak months before the totals move.
-3. **Each signal must beat the current forecast walk-forward** before it is used.
+**To do once the stage IDs are confirmed:**
+1. Run discovery, fill `STAGE_GROUPS`, fetch history from 2020.
+2. Forecast each stage from the stage before it, with lagged conversion: generalise
+   `src/forecasting/funnel.py` from Submitted ← Received to a chain Offer ← Submitted, Deposit ← Offer,
+   Visa document ← Deposit. Each link is gated by the common rule.
+3. Booking curve by intake: compare cumulative stage counts for an upcoming intake with the same point
+   last year, as an early signal of a strong or weak intake.
+4. Add stage pages to the monthly pack and stage rows to the country forms.
 
 ## v2.4.0 — External drivers
 - Intake extract and descriptive arrival view shipped in v2.1 (the forecast stays monthly).

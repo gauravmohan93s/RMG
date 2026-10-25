@@ -1,4 +1,4 @@
-# Methodology (v2)
+# Methodology (v2.2)
 
 This document is the scientific reference for the pipeline: what is done, why, and
 where it lives in the code. Every number a report shows can be traced to a rule here.
@@ -44,8 +44,9 @@ ETS 0.80, TSB 0.80, Theta 0.83, LastYear_MoM 0.84, GlobalXGB 0.86, GlobalLGBM 0.
 AutoARIMA 0.99, Croston 1.05, SNaiveGrowth 1.06, AvgMonthly_MoM 1.18 (Model Catalogue sheet).
 
 ## 3. Rolling-origin backtest (`src/forecasting/backtest.py`)
-For each of the last **24 month-ends** (origins), every eligible model is fitted on data
-up to that month only and forecasts the next **12** months. The harness is the only code
+For each of the last **36 month-ends** (origins; v2.2, was 24), every eligible model is fitted on
+data up to that month only and forecasts the next **12** months. The last **24** origins form the
+walk-forward (honest) test window, covering both the 2024–25 dip and the 2025–26 surge. The harness is the only code
 that slices history, so leakage is impossible by construction — and `tests/test_backtest.py`
 proves it by shocking future values and checking that past forecasts do not change.
 All models of a series are scored on identical (origin, horizon) pairs.
@@ -57,7 +58,7 @@ All models of a series are scored on identical (origin, horizon) pairs.
   `mean_all` (default): equal-weight average of every eligible model;
   `mean_screened`: average of the models that beat the benchmark on past data;
   `top_k`: average of the best k that beat the seasonal-naive benchmark.
-- **Walk-forward (honest) evaluation**: for each of the last 12 origins e, every policy
+- **Walk-forward (honest) evaluation**: for each of the last 24 origins e, every policy
   is replayed using only errors whose target month ≤ e. This measures the accuracy of
   the *procedure* with no selection bias, and is recomputed every run
   (`Evaluation/policy_comparison.csv`, Policy Comparison sheet).
@@ -65,8 +66,12 @@ All models of a series are scored on identical (origin, horizon) pairs.
   error (0.73× seasonal naive with 7 models, 0.67× with all 17) and beat top-3 selection,
   screened averaging and the best single model — the well-documented "forecast combination puzzle"
   (see `docs/experiments/2026-09-27_combination_policy.md`).
-- **Benchmark fallback**: a series whose policy loses to seasonal naive by >5% in the
-  walk-forward test uses seasonal naive instead.
+- **Hedge, not a hard fallback** (v2.2): where the model average loses to seasonal naive by > 5% in the
+  walk-forward test, the published forecast is w(h) × same month last year + (1 − w(h)) × model average,
+  with w = 0.5 next month rising to 1 at 12 months. On those 11 series the next-quarter miss fell from
+  14.3% (last year only) to 11.6%, and the 6-month miss from 14.4% to 10.9%.
+- **Accuracy-weighted average** (1/error, shrunk 50% to equal weights) is a tested candidate. It lost to
+  equal weights (quarter error 17.16% vs 17.06%), so it is reported only.
 
 ## 5. Guardrails (`src/forecasting/guardrails.py`)
 The 12-month total must lie within [0.5 × min(ref), 1.8 × max(ref)], where the references
@@ -75,6 +80,17 @@ Genuine growth passes (its momentum reference is high); model failures do not. A
 series is scaled to the bound (seasonal shape kept), marked Low confidence and flagged.
 
 ## 6. Reconciliation (`src/forecasting/reconcile.py`)
+**Choice (v2.2).** Five ways of making regions, countries and the organisation add up are replayed
+walk-forward on **next-quarter totals per level**, the decision metric:
+- `none`;
+- `bottom_up` (sum of regions);
+- `wls_var`;
+- `mint_shrink`;
+- `middle_out` (each country's own forecast split to its regions by 12-month share).
+
+The lowest error averaged over levels wins. On 2026-09 data `bottom_up` won (16.9% vs `wls_var` 17.4%,
+`middle_out` 17.7%). `wls_var` had won only on monthly error.
+
 Base forecasts for all levels are combined with the MinT family estimator
 ỹ = S (Sᵀ W⁻¹ S)⁻¹ Sᵀ W⁻¹ ŷ (Wickramasuriya, Athanasopoulos & Hyndman, 2019).
 Default W = diagonal of one-step backtest error variances (WLS); `mint_shrink` uses the
@@ -119,6 +135,11 @@ totals (from the totals' own errors, since monthly ranges do not add up).
   - Longer windows without enough own evidence use location-scale pooling: the series' own quarter
     volatility × the pooled shape of k-month/quarter errors of comparable series.
   - Ranges never narrow (in %) as the window lengthens.
+  - For the **Region group** (which includes single-region destinations such as Europe and Asia), the
+    series' own long-window spread is blended with that estimate on the log scale, weighted by its
+    independent windows (n/k against 2). Tested: Region 12-month interval score 5.27 → 5.07, coverage
+    unchanged. For countries it made ranges worse, so it is not applied there (§12,
+    `docs/experiments/2026-10-25_long_window_blend.md`).
 
   See `docs/experiments/2026-09-27_long_horizon_and_ranges.md`.
 - **What width means.** A range can only be as narrow as the forecast is accurate. The 50% range is
@@ -131,8 +152,48 @@ The data-driven replacement for guessed policy multipliers. Recent bias of each 
 median log error of the last 6 realised months (1–3 months ahead); empirical-Bayes
 (James-Stein) shrinkage towards 0 so noisy series barely move; applied as a persistent
 ("level") or fading ("decay", ×0.85 per month) multiplier capped to ×0.67–×1.5. Both are
-replayed walk-forward and adopted only if walk-forward WAPE improves by ≥ 1% (relative);
-the test and every series' multiplier are reported (Statistical Overlay sheet).
+replayed walk-forward and adopted under the common rule (§7f). On 2026-09 data it was adopted (`decay`):
+next-quarter miss for countries 18.8% → 14.6%, regions 22.3% → 20.4%. Until v2.2 it was judged on a 1%
+monthly-WAPE gain, which flipped between runs; the test and every series' multiplier are reported
+(Statistical Overlay sheet).
+
+## 7c. Submissions from receipts: the funnel (`src/forecasting/funnel.py`)
+Submissions follow receipts (12-month log changes correlate 0.97 at lag 0). The funnel forecast is
+Submitted[t] = Σ w_l · Received[t−l], l = 0, 1, 2:
+- the weights are non-negative least squares on the last 12 realised months, re-fitted at each origin;
+- receipts are actual up to the origin and the published receipt forecast after it.
+
+Model, funnel and a 50/50 blend compete under §7f. On 2026-09 data the funnel won (next-quarter miss:
+organisation 13.0% → 10.6%, countries 20.9% → 19.0%).
+
+## 7d. Direction signal from the latest vintages (`src/forecasting/vintage.py`)
+Before a new forecast, the misses of the latest forecasts on the months already known are measured:
+- the forecasts made 5, 4 and 3 months ago (full quarters);
+- the forecasts made 2 and 1 months ago (the latest months).
+
+The misses are recency-weighted and read at the country total. The published receipt forecasts of the
+country's regions are corrected by half that gap, and totals are re-summed. Gated by §7f: it passed in
+the first test (countries 18.4% → 14.2%) but not once the hedge and funnel removed most of the lag, so
+it is currently off and re-tested every month. The pack's Direction Check page shows these misses.
+
+## 7e. Calendar and festival effects (`src/forecasting/calendar_fx.py`)
+For each 26th–25th cycle the difference from the same cycle last year is measured: working days and
+moving festivals (Diwali, Holi, Eid al-Fitr). Effects are fitted walk-forward on organisation and
+country receipt misses (+5.3% per working day, Diwali −8.5%, Eid −11.6%; bounded). The same factor
+applies to every series in a month, so totals still add up. The component is adopted on month-level
+accuracy for months 1–3 (≥ 3% better) and must not worsen quarters. On 2026-09 data the gain was 1.3%,
+so it is off. **Maintenance:** extend the festival dates every year.
+
+## 7f. One decision rule and the quarterly lock (`src/governance/decisions.py`)
+**Rule.** Every component above, and the reconciliation and point estimate, is judged on next-quarter
+totals per level, averaged over levels, and adopted only when at least 3% better. The calendar effects
+are judged on single months instead.
+
+**Lock.** Choices are re-decided in Jan, Apr, Jul and Oct. Between reviews a choice changes only if the
+alternative is at least 6% better. Every decision, its scores and its reason are stored in
+`method_decisions.json` and shown on the Method Decisions sheet. This stops numbers jumping because a
+close test tipped the other way. In v2.1 one flip moved the organisation forecast by 12% with identical
+data.
 
 ## 7b. Measured policy events (`src/analysis/signals.py`)
 For each event in `Settings.xlsx!Policy_Events`, impact = actual / counterfactual − 1 over the
@@ -157,8 +218,13 @@ ratio to the centred 2×12 moving average (trend removed) per year; Consistency 
 in the same class. Staffing calendar: forecast / average forecast month, class, capacity plan =
 80% high; optional FTE via `seasonality.apps_per_fte_month`.
 
-## 9b. Human signals and the forecast record (`src/analysis/signals.py`)
-Manager expectations (`Settings.xlsx!Human_Inputs`) are recorded each run, shown against the
+## 9b. Human signals and the forecast record (`src/analysis/signals.py`, `src/reports/forms.py`)
+Each run writes one input file per destination (`Forms/<YYYY-MM>/To_Send`) with two sheets:
+- staffing rates, or headcount (a rate is then derived from the last 12 months' volume);
+- market expectations for the next 3 months, next to the model's forecast and range.
+
+`collect-forms` validates the returned files and writes `Settings.xlsx` (backed up first). Manager
+expectations (`Settings.xlsx!Human_Inputs`) are recorded each run, shown against the
 model and scored against actuals; a person is blended in (inverse-error weight) only after ≥ 6
 scored months in which they beat the model. Forecast vs Actual: every month's actual against the
 forecasts made 1–12 months earlier — from the walk-forward test (what the method would have said
@@ -171,11 +237,15 @@ at the time) plus every live forecast stored in `prediction_history_v2.parquet`.
   Review = guardrail-capped. Reliability describes how predictable a market is; every series already uses
   the most accurate method found, so "Low" never means a weaker method was used.
   (v2.1 labelled single-month, unreconciled errors, which overstated uncertainty for decisions.)
-- **Ranges** are built from the errors of the published forecasts (with bottom-up reconciliation, the
-  regions' summed forecasts — not the aggregate's own model), then conformally calibrated (widen-only).
+- **Ranges**: see §7. "Most likely" = 50% range, "plan for" = 80% range; a 12-month range wider than the
+  forecast itself is labelled "direction only: plan on the next quarter".
 - **YoY** always compares identical calendar months (like-for-like).
-- **Fiscal periods**: FY starts in April; outlook = realised actuals + forecast remainder;
-  only complete quarters/years are shown.
+- **Fiscal periods**: FY starts in April; outlook = realised actuals + forecast remainder. Its range
+  covers the remainder only, so it narrows every month as actuals arrive. Only complete quarters/years
+  are shown.
+- **Revisions**: "vs last run" = change against the previous month's forecast for the same target months
+  (from the prediction history). Revisions are shown, not smoothed: damping them made countries worse
+  (13.4% → 14.6%).
 - **Staffing FTE**: computed per region with that region's applications-per-FTE rate
   (`Settings.xlsx!Staffing_Productivity`, most specific row wins); country / organisation FTE = sum of
   their regions' FTE (rates differ by country group and region).
@@ -186,12 +256,22 @@ at the time) plus every live forecast stored in `prediction_history_v2.parquet`.
 - `prediction_history_v2.parquet`: every forecast issued; later runs join actuals to report
   realised WAPE, bias and interval coverage by horizon (Track Record sheet). Horizon is
   counted from the last actual month.
+- `method_decisions.json`: the locked method choices (§7f).
+- `Snapshots/extract_<YYYY-MM>.parquet`: the extract as used each month. Later runs measure how much a
+  month's count grew after it was first reported (late entries). This is flagged in Data Quality when ≥ 3
+  months show ≥ 3% uplift, and the latest month is checked for being partly loaded (red banner).
+- **Publishing**: each `all` run copies the reports to `Outcomes/<YYYY-MM> Forecast Pack/` (kept) and
+  `Outcomes/Latest/` for executives.
 - Hard invariants (the run fails rather than publish): no negatives, no past-dated rows,
   point inside both intervals, 95% ⊇ 80%, regions sum to totals.
 
 ## 12. Known limitations
-- Univariate: turning points driven by policy, marketing or visa shocks cannot be foreseen
-  from history alone — in the 2025→2026 rebound all methods under-forecast. Use the
-  overlay for known events; v2.2 adds leading indicators.
-- Forecasts are by month of application, not by target intake (v2.2 — needs the intake field in the extract).
+- **Turning points.** Turning points driven by policy, marketing or visa shocks cannot be foreseen
+  from receipts history. The models lag them: +9% in the 2024–25 fall, −6% to −17% in the 2025–26 surge.
+  Stage data (offers, deposits, CAS / Funds / AIP / I-20) is the planned lever (ROADMAP v2.3); the
+  extract is prepared in `fetch_data.py`.
+- **12-month country totals.** Typical misses are 34–42% for Australia, Canada, New Zealand and the
+  USA, against 14% for the UK and 15% for the organisation. Plan countries on the next quarter.
+- **Intake.** Forecasts are by month of application, not by target intake (the intake view is
+  descriptive).
 - The log back-transform gives median-type forecasts (slightly below the mean for skewed counts).

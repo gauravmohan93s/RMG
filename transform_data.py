@@ -15,6 +15,8 @@ SETTINGS_PATH = BASE_DIR / "Settings.xlsx"
 FINAL_PATH    = BASE_DIR / "monthly_final_summary.xlsx"
 INTAKE_PATH       = BASE_DIR / "monthly_intake_summary.xlsx"
 INTAKE_FINAL_PATH = BASE_DIR / "intake_final_summary.xlsx"
+STAGE_PATH        = BASE_DIR / "monthly_stage_summary.xlsx"
+STAGE_FINAL_PATH  = BASE_DIR / "stage_final_summary.xlsx"
 # ─────────────────────────────────────────────────────────────────────────────
 
 def generate_final_summary() -> Tuple[List[int], List[int]]:
@@ -145,6 +147,43 @@ def generate_intake_summary() -> bool:
     return True
 
 
+def _map_ids(df: pd.DataFrame) -> pd.DataFrame:
+    """CountryId / TagGroupID -> Country Grouped / RegionName with the Settings.xlsx mappings ('Other' if unmapped)."""
+    df["CountryId"] = pd.to_numeric(df["CountryId"], errors="coerce").astype("Int64")
+    df["TagGroupID"] = pd.to_numeric(df["TagGroupID"], errors="coerce").astype("Int64")
+    countries = pd.read_excel(SETTINGS_PATH, sheet_name="Country", dtype={"CountryId": int})
+    regions = pd.read_excel(SETTINGS_PATH, sheet_name="Region").melt(
+        id_vars=["id"], var_name="Country Grouped", value_name="RegionName").rename(columns={"id": "TagGroupID"})
+    regions["TagGroupID"] = pd.to_numeric(regions["TagGroupID"], errors="coerce").astype("Int64")
+    df = df.merge(countries[["CountryId", "Country Grouped"]], on="CountryId", how="left")
+    df["Country Grouped"] = df["Country Grouped"].fillna("Other")
+    df = df.merge(regions[["TagGroupID", "Country Grouped", "RegionName"]], on=["TagGroupID", "Country Grouped"],
+                  how="left")
+    df["RegionName"] = df["RegionName"].fillna("Other")
+    return df
+
+
+def generate_stage_summary() -> bool:
+    """
+    Map the stage extract (fetch_data: monthly_stage_summary.xlsx: applications reaching offer, deposit,
+    visa document... for the first time in each 26th-25th cycle) to Country Grouped / Name of Region.
+    Output (long): Month, Country Grouped, Name of Region, StageGroup, Apps. Returns False if absent.
+    """
+    if not STAGE_PATH.exists():
+        print(f"ℹ️  No stage extract at {STAGE_PATH} (fill STAGE_GROUPS in fetch_data.py) — skipping stage summary.")
+        return False
+    df = pd.read_excel(STAGE_PATH, dtype={"ReportMonth": str, "StageGroup": str}).rename(columns={"ReportMonth": "Month"})
+    df["Apps"] = pd.to_numeric(df["Apps"], errors="coerce").fillna(0)
+    df = _map_ids(df)
+    out = (df.groupby(["Month", "Country Grouped", "RegionName", "StageGroup"], as_index=False)["Apps"].sum()
+             .rename(columns={"RegionName": "Name of Region"}))
+    out.to_excel(STAGE_FINAL_PATH, index=False)
+    print(f"✅ Stage summary written to {STAGE_FINAL_PATH} ({len(out)} rows, stages: "
+          f"{', '.join(sorted(out['StageGroup'].unique()))})")
+    return True
+
+
 if __name__ == "__main__":
     generate_final_summary()
     generate_intake_summary()
+    generate_stage_summary()
