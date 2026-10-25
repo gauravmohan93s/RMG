@@ -210,14 +210,20 @@ python run_pipeline.py collect-forms
 `Settings.xlsx` is backed up first, then its `Staffing_Productivity` and `Human_Inputs` sheets are updated.
 The next run uses them.
 
-### Stage data (offers, deposits, visa documents): one-time setup
+### Stage data (offers, deposits, visa documents)
+The stage groups in `fetch_data.py` (`STAGE_GROUPS`) are defined from `Region - Team.xlsx`, sheet AppStatus2.
+If stage IDs are added or changed there, update `STAGE_GROUPS`; the read-only check
 
 ```bash
 python fetch_data.py --discover-stages
 ```
 
-This writes `stage_discovery.xlsx` with the stage IDs in use and their names. Fill `STAGE_GROUPS` in
-`fetch_data.py` from it; the monthly fetch then also builds `monthly_stage_summary.xlsx`.
+lists the IDs in use. Every `all` run then:
+1. fetches `monthly_stage_summary.xlsx`;
+2. maps it to `stage_final_summary.xlsx`;
+3. forecasts the stages (pack page "Pipeline stages", Stage Forecast sheet).
+
+The first fetch pulls history from 2020 and takes longer.
 
 ### Executive outputs (`RMG Calculations/Outcomes/`)
 Every `all` run publishes the reports for executives (no evidence files):

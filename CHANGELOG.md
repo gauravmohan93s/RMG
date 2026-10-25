@@ -3,6 +3,23 @@
 All notable changes are recorded here. Format: [Keep a Changelog](https://keepachangelog.com/);
 versioning: [SemVer](https://semver.org/) as defined in `docs/ROADMAP.md`.
 
+## [2.3.0] — 2026-10-25
+
+### Added
+- **Pipeline stages after submission**: Offer, Deposit, Visa document, Visa applied, Visa granted.
+  - **Definitions** come from `Region - Team.xlsx`, sheet AppStatus2 (CF Staff View). A milestone is
+    crossed the first time an application reaches any stage flagged with it.
+  - **Visa document is country-specific:** CAS (UK), Funds stage / COE (Australia), AIP (NZ), I-20 (USA).
+  - **Extract** (`fetch_data.py`): the stage map is a join table, so one status counts for every
+    milestone it implies. Verified on synthetic history in SQLite (`tests/test_stage_sql.py`).
+  - **Forecast** (`src/forecasting/stages.py`): a chain from the published submission forecast, with
+    lagged conversion fitted by non-negative least squares on the last 12 months. It competes with same
+    month last year and a blend on next-quarter totals and is used only if at least 3% better. Ranges come
+    from each stage's own walk-forward errors.
+  - **Reports**: "Pipeline stages" page in the pack; Stage Forecast and Stage Evidence sheets.
+  - **Robustness**: it runs automatically when `stage_final_summary.xlsx` exists. It is supplementary:
+    a stage-data problem is logged in the manifest and never stops the main forecast.
+
 ## [2.2.1] — 2026-10-25
 
 ### Added

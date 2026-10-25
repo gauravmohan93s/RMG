@@ -195,6 +195,26 @@ alternative is at least 6% better. Every decision, its scores and its reason are
 close test tipped the other way. In v2.1 one flip moved the organisation forecast by 12% with identical
 data.
 
+## 7g. Pipeline stages after submission (`src/forecasting/stages.py`)
+**Definition.** Stages are those of AppStatus2 (CF Staff View). Each ApplicationStageId is flagged with
+the milestones it implies, and an application crosses a milestone the first time it reaches any stage
+flagged with it, counted per 26th–25th cycle:
+- Offer;
+- Deposit;
+- Visa document: CAS (UK), Funds/COE (Australia), AIP (NZ), I-20 (USA), else any visa document;
+- Visa applied;
+- Visa granted.
+
+**Forecast.** Each stage comes from the one before it, starting from the published submission forecast:
+stage[t] = Σ w_l · upstream[t−l], l = 0..3, with non-negative weights fitted on the last 12 months at
+each origin.
+
+**Choice.** The chain, same month last year and their blend are replayed walk-forward and scored on
+next-quarter totals (organisation and countries). The chain or blend must be at least 3% better than
+last year's pattern.
+
+**Ranges** are the 10/90 and 25/75 quantiles of the chosen variant's own errors by horizon band.
+
 ## 7b. Measured policy events (`src/analysis/signals.py`)
 For each event in `Settings.xlsx!Policy_Events`, impact = actual / counterfactual − 1 over the
 next 6 months, where the counterfactual is an average of SNaive, SNaiveGrowth, ETS and Theta

@@ -44,15 +44,27 @@ COUNTRY_SUBMITTED_STAGES = {
 }
 DEFAULT_SUBMITTED_STAGES = [4, 81]
 
-# Later stages to extract (v2.3). Fill the ApplicationStageId lists from stage_discovery.xlsx.
-# "*" = all countries; a CountryId key overrides "*" for that country (country-specific visa documents).
-# Leave a group empty to skip it. Nothing is fetched while every list is empty.
+# Later stages to extract (v2.3). Source: "Region - Team.xlsx", sheet AppStatus2 (CF Staff View), where each
+# ApplicationStageId is flagged with every milestone it implies (e.g. 20 "Visa Received" = Offers + Deposit
+# + Visa_Applied + Visa_Recieved). A milestone is "crossed" the FIRST time an application reaches any stage
+# flagged with it, so an application that skips an intermediate status is still counted.
+# "*" = all countries; a CountryId key overrides it for that country (1 USA, 2 Australia, 4 UK, 5 NZ).
+_VISA_APPLIED = [15, 19, 20, 21, 24, 34, 46, 48, 49, 50, 51, 52, 78, 84, 101, 103]      # flag Visa_Applied
+_VISA_DOCS = [15, 17, 18, 34, 73, 84]          # COE, CAS received, I-20 received, AIP, CAS (reason req.), PAL
 STAGE_GROUPS = {
-    "Offer":        {"*": []},          # conditional / unconditional offer
-    "Deposit":      {"*": []},          # deposit / tuition fee paid
-    "Visa_Document": {"*": []},         # e.g. {<UK CountryId>: [CAS id], <Australia>: [Funds/COE id],
-                                        #       <New Zealand>: [AIP id], <USA>: [I-20 id]}
-    "Visa_Outcome": {"*": []},          # visa granted
+    "Offer": {"*": [5, 6, 13, 14, 15, 16, 17, 18, 19, 20, 21, 24, 26, 30, 31, 32, 34, 36, 46, 48, 49, 50, 51,
+                    52, 58, 60, 61, 64, 72, 73, 75, 78, 83, 84, 88, 91, 97, 98, 101, 102, 103]},      # flag Offers
+    "Deposit": {"*": [15, 16, 17, 19, 20, 21, 24, 26, 32, 34, 44, 46, 48, 49, 50, 51, 52, 73, 78, 83, 84, 88,
+                      98, 101, 102, 103]},                                                         # flag Deposit
+    "Visa_Document": {                          # the country's visa document, or any later visa stage
+        "*": sorted(set(_VISA_DOCS) | set(_VISA_APPLIED)),
+        4: sorted({17, 73} | set(_VISA_APPLIED)),                              # UK: CAS received
+        2: sorted({13, 14, 58, 60, 61, 72, 15} | set(_VISA_APPLIED)),          # Australia: Funds stage / COE
+        5: sorted({34} | set(_VISA_APPLIED)),                                  # New Zealand: AIP received
+        1: sorted({18} | set(_VISA_APPLIED)),                                  # USA: I-20 received
+    },
+    "Visa_Applied": {"*": _VISA_APPLIED},
+    "Visa_Granted": {"*": [20, 24, 46, 48, 49, 50, 51, 52, 78]},                           # flag Visa_Recieved
 }
 STAGE_OUTPUT_PATH = Path(os.environ.get("RMG_STAGE_OUTPUT_PATH", str(DATA_ROOT / "monthly_stage_summary.xlsx")))
 
@@ -196,38 +208,43 @@ def _stage_groups_active(groups=None) -> dict:
     return {g: {k: v for k, v in m.items() if v} for g, m in groups.items() if any(m.values())}
 
 
-def _stage_case(groups) -> str:
-    """CASE expression mapping (CountryId, ApplicationStageId) -> StageGroup; country keys before '*'."""
-    whens = []
+def _stage_map_values(groups) -> str:
+    """VALUES rows (StageGroup, CountryId or NULL, StageId). A stage can belong to several groups (a visa
+    granted application has also crossed offer, deposit...), so groups are a join table, not a CASE."""
+    rows = []
     for g, m in groups.items():
         for cid, ids in m.items():
-            if cid == "*":
-                continue
-            whens.append(f"WHEN avs.CountryId = {int(cid)} AND ah.ApplicationStageId IN ({','.join(str(int(i)) for i in ids)}) "
-                         f"THEN '{g}'")
-        if m.get("*"):
-            excl = [int(c) for c in m if c != "*"]
-            cond = f"avs.CountryId NOT IN ({','.join(map(str, excl))}) AND " if excl else ""
-            whens.append(f"WHEN {cond}ah.ApplicationStageId IN ({','.join(str(int(i)) for i in m['*'])}) THEN '{g}'")
-    return "CASE " + " ".join(whens) + " END"
+            c = "NULL" if cid == "*" else str(int(cid))
+            rows += [f"('{g}', {c}, {int(i)})" for i in ids]
+    return ",\n      ".join(rows)
 
 
 def build_stage_sql(start_dt, end_dt, submitted_stages_dict, default_stages, report_month, groups=None):
-    """Applications reaching each stage group for the FIRST time inside the 26->25 window (an application
-    that re-enters a stage later is not counted twice)."""
+    """Applications crossing each stage group for the FIRST time inside the 26->25 window. Country-specific
+    lists replace the '*' list for that country (e.g. CAS for the UK). Re-entering a stage later is not
+    counted again."""
     s = start_dt.strftime("%Y-%m-%d %H:%M:%S")
     e = end_dt.strftime("%Y-%m-%d %H:%M:%S")
-    grp = _stage_case(_stage_groups_active(groups))
+    values = _stage_map_values(_stage_groups_active(groups))
     return f"""
 WITH
+  StageMap AS (
+    SELECT * FROM (VALUES
+      {values}
+    ) v(StageGroup, CountryId, StageId)
+  ),
   StageEvents AS (
-    SELECT avs.CountryId, avs.TagGroupID, ah.AcknowledgementId, {grp} AS StageGroup,
+    SELECT avs.CountryId, avs.TagGroupID, ah.AcknowledgementId, m.StageGroup,
            MIN(DATEADD(MINUTE,330,ah.ChangedOn)) AS FirstReached
     FROM ApplicationHistory ah
     JOIN Application_View_Staff avs ON ah.AcknowledgementId = avs.AcknowledgementId
-    WHERE avs.CountryId IS NOT NULL AND {grp} IS NOT NULL
+    JOIN StageMap m ON m.StageId = ah.ApplicationStageId
+     AND (m.CountryId = avs.CountryId
+          OR (m.CountryId IS NULL AND NOT EXISTS (SELECT 1 FROM StageMap o
+                                                  WHERE o.StageGroup = m.StageGroup AND o.CountryId = avs.CountryId)))
+    WHERE avs.CountryId IS NOT NULL
       AND DATEADD(MINUTE,330,ah.ChangedOn) <= '{e}'   -- first reach up to the cycle end
-    GROUP BY avs.CountryId, avs.TagGroupID, ah.AcknowledgementId, {grp}
+    GROUP BY avs.CountryId, avs.TagGroupID, ah.AcknowledgementId, m.StageGroup
   )
 SELECT '{report_month}' AS ReportMonth, CountryId, TagGroupID, StageGroup,
        COUNT(DISTINCT AcknowledgementId) AS Apps

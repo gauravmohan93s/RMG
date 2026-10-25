@@ -369,6 +369,49 @@ def _page_destinations(res, S) -> List:
                       "confirm the assumption with the market team.", S["tl"]), PageBreak()]
 
 
+STAGE_ORDER = ("Offer", "Deposit", "Visa_Document", "Visa_Applied", "Visa_Granted")
+STAGE_LABEL = {"Offer": "Offers", "Deposit": "Deposits", "Visa_Document": "Visa document*", "Visa_Applied": "Visa applied",
+               "Visa_Granted": "Visa granted"}
+
+
+def _page_stages(res, S) -> List:
+    """Next-quarter pipeline after submission, per destination (only when stage data exists)."""
+    tot = getattr(res, "stage_totals", None)
+    if tot is None or tot.empty:
+        return []
+    q = tot[tot["Window"] == "Next 3 months"]
+    stages = [s for s in STAGE_ORDER if s in set(q["StageGroup"])]
+    rows = q.pivot_table(index=["Level", "Country"], columns="StageGroup", values="Forecast", aggfunc="sum")
+    yoy = q.pivot_table(index=["Level", "Country"], columns="StageGroup", values="YoY_Pct", aggfunc="first")
+    rows = rows.reset_index()
+    rows["_o"] = (rows["Level"] != "Organisation").astype(int)
+    rows = rows.sort_values(["_o", stages[0]], ascending=[True, False])
+    data = [["Next quarter"] + [STAGE_LABEL[s] for s in stages]]
+    st = []
+    for i, r in enumerate(rows.itertuples(index=False), start=1):
+        lvl, cty = r[0], r[1]
+        name = "Organisation" if lvl == "Organisation" else cty
+        cells = []
+        for s in stages:
+            v = getattr(r, s, np.nan) if hasattr(r, s) else rows.loc[rows.index[i - 1], s]
+            y = yoy.loc[(lvl, cty), s] if (lvl, cty) in yoy.index and s in yoy.columns else np.nan
+            cells.append(f"{_n(v)}  ({_pct(y)})" if np.isfinite(v) else "–")
+        data.append([name] + cells)
+        if lvl == "Organisation":
+            st.append(("FONT", (0, i), (-1, i), "Helvetica-Bold", 7.4))
+    w0 = 6.0
+    t = Table(data, colWidths=[w0 * cm] + [(FULL_W - w0) / len(stages) * cm] * len(stages), repeatRows=1)
+    t.setStyle(TableStyle([("FONT", (0, 0), (-1, -1), "Helvetica", 7.4), ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 7.4),
+                           ("BACKGROUND", (0, 0), (-1, 0), HEAD), ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+                           ("LINEBELOW", (0, 0), (-1, -1), 0.25, LINE), ("TOPPADDING", (0, 0), (-1, -1), 2),
+                           ("BOTTOMPADDING", (0, 0), (-1, -1), 2)] + st))
+    return [_header("Pipeline stages after submission — next quarter", res, S), Spacer(0, 6), t, Spacer(0, 5),
+            Paragraph("Applications expected to reach each stage for the first time in the next three months (change vs the "
+                      "same months last year). Each stage is forecast from the one before it where that tested better than "
+                      "last year's pattern. * Visa document = CAS (UK), Funds stage / COE (Australia), AIP (New Zealand), "
+                      "I-20 (USA), or the equivalent document elsewhere.", S["tl"]), PageBreak()]
+
+
 def _page_workload(res, S) -> List:
     st = getattr(res, "staffing", None)
     if st is None or st.empty:
@@ -497,7 +540,7 @@ def _countries(res) -> List[tuple]:
 def write_brief(res, path: Path) -> Path:
     """The monthly pack: organisation, destinations, workload, track record, one page per destination."""
     S = _styles()
-    story: List = _page_org(res, S) + _page_proof(res, S) + _page_direction(res, S) + _page_destinations(res, S) + _page_workload(res, S) + _page_track(res, S)
+    story: List = _page_org(res, S) + _page_proof(res, S) + _page_direction(res, S) + _page_destinations(res, S) + _page_stages(res, S) + _page_workload(res, S) + _page_track(res, S)
     for c, lab in _countries(res):
         story += _page_country(res, S, c, lab) + [PageBreak()]
     story += _page_legend(res, S)

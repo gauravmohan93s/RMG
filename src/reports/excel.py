@@ -409,6 +409,27 @@ def write_workbook(res, path: Path) -> Path:
             note="Acceptance checks fixed in advance and scored every month. Tested = forecasts re-made for past months "
                  "with only the data then available; Live = published forecasts as their actuals arrive. Trust a use once "
                  "the live column passes for 3 consecutive months.")
+    st_tot = getattr(res, "stage_totals", None)
+    if st_tot is not None and len(st_tot):
+        stw = st_tot.pivot_table(index=["Level", "Country", "Window"], columns="StageGroup", values="Forecast",
+                                 aggfunc="sum").reset_index()
+        b.table("Stage Forecast", stw, formats={c: "int" for c in stw.columns[3:]},
+                note="Applications expected to reach each stage after submission (first time in the 26th-25th cycle), "
+                     "forecast from the stage before it (conversion chain) or same month last year, whichever tested "
+                     "better on next-quarter totals.")
+        yoy = st_tot.pivot_table(index=["Level", "Country", "Window"], columns="StageGroup", values="YoY_Pct").reset_index()
+        b.table("Stage Forecast", yoy, start_row=len(stw) + 5, formats={c: "pct_plain" for c in yoy.columns[3:]},
+                note="Change vs the same months last year (%).")
+        conv = getattr(res, "stage_conversion", None)
+        if conv is not None and len(conv):
+            b.table("Stage Forecast", conv, start_row=len(stw) + len(yoy) + 10,
+                    note="Conversion from the previous stage over the last 12 months (%), and how it is spread over the "
+                         "months after (lag 0 = same month).")
+        stt = getattr(res, "stage_test", None)
+        if stt is not None and len(stt):
+            b.table("Stage Evidence", stt, formats={"Quarter_Error_Pct": "pct_plain", "N": ""},
+                    note="Walk-forward test per stage: typical miss (%) on next-quarter totals for same month last year "
+                         "(snaive), the conversion chain and their blend. Chosen = used (must beat snaive by >= 3%).")
     ctest = getattr(res, "calendar_test", None)
     if ctest is not None and len(ctest):
         ctw = ctest.pivot_table(index=["Window", "Level"], columns="Variant", values="Error_Pct").reset_index()

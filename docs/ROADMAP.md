@@ -48,23 +48,21 @@ metric for every model; nothing fitted on data after a forecast origin.
 - Shipped: evidence-chosen ranges, 24-origin walk-forward, health check, funnel model for submissions,
   fiscal-year outlook with narrowing range, monthly visual pack + country PDFs.
 
-## v2.3.0 — Stage (pipeline) data: the lever for turning points
-**Prepared in v2.2.x (code ready, not yet run against the database):**
-- `python fetch_data.py --discover-stages` lists the stage IDs in use (read-only).
-- `STAGE_GROUPS` in `fetch_data.py` defines offer, deposit, visa document and visa outcome, with
-  country-specific IDs for CAS (UK), Funds/COE (Australia), AIP (NZ) and I-20 (USA).
-- The monthly fetch writes `monthly_stage_summary.xlsx`, counting each application the first time it
-  reaches a stage in the 26th–25th cycle.
-- `transform-data` writes `stage_final_summary.xlsx` (Country Grouped / Name of Region).
+## v2.3.0 — Stage (pipeline) data (code released 2026-10-25; first data with the next fetch)
+**Done:**
+- Stage definitions from AppStatus2: offer, deposit, country-specific visa document, visa applied, visa
+  granted.
+- First-reach extract per cycle (`fetch_data.py`, SQL verified on synthetic history).
+- Mapping (`transform-data`).
+- Chain forecast gated against last year (`stages.py`).
+- Pack page and workbook sheets.
 
-**To do once the stage IDs are confirmed:**
-1. Run discovery, fill `STAGE_GROUPS`, fetch history from 2020.
-2. Forecast each stage from the stage before it, with lagged conversion: generalise
-   `src/forecasting/funnel.py` from Submitted ← Received to a chain Offer ← Submitted, Deposit ← Offer,
-   Visa document ← Deposit. Each link is gated by the common rule.
-3. Booking curve by intake: compare cumulative stage counts for an upcoming intake with the same point
+**Next, once real stage history has been fetched:**
+1. Review the Stage Evidence sheet: is the chain chosen, and are conversion rates and lags plausible per
+   country?
+2. Booking curve by intake: compare cumulative stage counts for an upcoming intake with the same point
    last year, as an early signal of a strong or weak intake.
-4. Add stage pages to the monthly pack and stage rows to the country forms.
+3. Stage rows in the country input forms, if market leads want to give stage expectations.
 
 ## v2.4.0 — External drivers
 - Intake extract and descriptive arrival view shipped in v2.1 (the forecast stays monthly).

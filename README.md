@@ -1,4 +1,4 @@
-# RMG Application-Flow Forecasting (v2.2)
+# RMG Application-Flow Forecasting (v2.3)
 
 Monthly 12-month forecast of applications **Received** and **Submitted** for the organisation,
 every destination country and every region. Each forecast comes with ranges that have been tested
@@ -59,6 +59,7 @@ src/forecasting/backtest.py        rolling-origin backtest (leak-free by constru
 src/forecasting/selection.py       scoring, combination policies, walk-forward evaluation
 src/forecasting/bias_correction.py recent-bias correction and point-estimate test
 src/forecasting/funnel.py          submissions from receipts
+src/forecasting/stages.py          offers, deposits, visa stages: conversion chain from submissions
 src/forecasting/vintage.py         direction signal from the latest forecasts
 src/forecasting/calendar_fx.py     working-day and festival effects per 26th-25th cycle
 src/forecasting/reconcile.py       bottom-up / WLS / MinT / middle-out, chosen on quarter totals
@@ -74,7 +75,7 @@ fetch_data.py, transform_data.py   SQL extract (26th-25th cycles, incl. stage da
 
 ## Versioning
 Semantic versioning; the version (`src/__init__.py`) is stamped into every output. Releases are git
-tags (`v1.0.0` legacy pipeline, `v2.0.0` this engine, `v2.2.0` current). See
+tags (`v1.0.0` legacy pipeline, `v2.0.0` this engine, `v2.3.0` current). See
 [CHANGELOG.md](CHANGELOG.md) and the plan in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Extending

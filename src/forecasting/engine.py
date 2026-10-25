@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 
 from .. import __version__
-from ..config import CODE_ROOT, INTAKE_FILE, RAW_FILE, SETTINGS_FILE, Settings
+from ..config import CODE_ROOT, INTAKE_FILE, RAW_FILE, SETTINGS_FILE, STAGE_FILE, Settings
 from ..data.prepare import METRICS, ORG, TOTAL, Panel, build_panel, load_raw, node_id
 from ..governance import manifest as mf
 from ..governance import tracking
@@ -32,6 +32,7 @@ from ..analysis import intake as itk
 from . import bias_correction as bc
 from . import calendar_fx as cx
 from . import funnel as fn
+from . import stages as sg
 from . import vintage as vt
 from . import guardrails as gr
 from . import intervals as iv
@@ -83,6 +84,10 @@ class RunResult:
     vintage_test: pd.DataFrame
     decisions: pd.DataFrame
     calendar_test: pd.DataFrame
+    stage_forecast: pd.DataFrame
+    stage_totals: pd.DataFrame
+    stage_test: pd.DataFrame
+    stage_conversion: pd.DataFrame
     data_revisions: pd.DataFrame
     seasonal_index: pd.DataFrame
     seasonal_by_year: pd.DataFrame
@@ -127,6 +132,10 @@ ARTEFACTS = {
     "vintage_test": "Evaluation/vintage_signal_test.csv",
     "decisions": "Evaluation/method_decisions.csv",
     "calendar_test": "Evaluation/calendar_effects_test.csv",
+    "stage_forecast": "Final_Forecast/stage_forecast.csv",
+    "stage_totals": "Final_Forecast/stage_totals.csv",
+    "stage_test": "Evaluation/stage_test.csv",
+    "stage_conversion": "Evaluation/stage_conversion.csv",
     "data_revisions": "Data/data_revisions.csv",
     "seasonal_index": "Analysis/seasonal_index.csv",
     "seasonal_by_year": "Analysis/seasonal_by_year.csv",
@@ -155,7 +164,7 @@ def label(level: str, country: str, region: str) -> str:
 def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Path = RAW_FILE,
                  settings_file: Path = SETTINGS_FILE, history_path: Optional[Path] = None,
                  raw: Optional[pd.DataFrame] = None, intake_file: Optional[Path] = INTAKE_FILE,
-                 intake_raw: Optional[pd.DataFrame] = None) -> RunResult:
+                 intake_raw: Optional[pd.DataFrame] = None, stage_file: Optional[Path] = STAGE_FILE) -> RunResult:
     timings: Dict[str, float] = {}
     t0 = time.perf_counter()
     # method decisions are locked per quarter (see governance/decisions.py)
@@ -459,6 +468,21 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
     fc = fc.sort_values(["Metric", "Level", "Country", "Region", "Date"], key=_level_sort).reset_index(drop=True)
 
     invariants = gr.check_invariants(fc, last_actual, levels)
+
+    # pipeline stages after submission (offer, deposit, visa...): supplementary, never blocks the forecast
+    stage_fc = stage_tot = stage_test = stage_conv = pd.DataFrame()
+    stage_status = "no stage extract"
+    if stage_file is not None and Path(stage_file).exists():
+        try:
+            sa = sg.load_stage_actuals(Path(stage_file), panel.months)
+            stage_fc, stage_test, stage_conv = sg.run(sa, Y_full, nodes, honest, fc, months_ext, T, H)
+            stage_tot = sg.stage_totals(stage_fc)
+            stage_status = (f"forecast: {', '.join(stage_fc['StageGroup'].unique())}" if len(stage_fc)
+                            else "extract present, too little history")
+        except Exception as exc:                                  # noqa: BLE001 - log and continue
+            LOG.exception("stage forecast failed")
+            stage_status = f"failed: {type(exc).__name__}: {exc}"
+    lap("stages")
     coherence = gr.coherence_gap(fc)
     lap("assemble")
 
@@ -531,6 +555,7 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
         "human_inputs_source": human_source, "human_inputs_rows": int(len(hi)),
         "policy_events_source": events_source,
         "staffing_productivity_source": prod_source,
+        "stages": stage_status,
         "intake_extract": (str(intake_file) if intake_df is not None and len(intake_df) else "not available"),
         "intake_known_share": i_known,
     })
@@ -540,7 +565,7 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
                     series_status=panel.series_status, dq=panel.dq, scores=scores, selection=selection,
                     accuracy=accuracy, policy_comparison=policy_cmp, calibration=calib, block_calibration=block_calib, range_test=range_test, range_tested=range_tested, guardrails=guards, overlay_rules=rules,
                     catalogue=catalogue, failures=bt.failures, track_scorecard=track_sc,
-                    bias_test=bias_test, bias_estimates=bias_est, reconciliation_test=recon_test, point_estimate_test=smear_test, funnel_test=funnel_test, vintage_test=vintage_test, decisions=decisions, calendar_test=calendar_test, data_revisions=data_rev, seasonal_index=sidx, seasonal_by_year=syear,
+                    bias_test=bias_test, bias_estimates=bias_est, reconciliation_test=recon_test, point_estimate_test=smear_test, funnel_test=funnel_test, vintage_test=vintage_test, decisions=decisions, calendar_test=calendar_test, stage_forecast=stage_fc, stage_totals=stage_tot, stage_test=stage_test, stage_conversion=stage_conv, data_revisions=data_rev, seasonal_index=sidx, seasonal_by_year=syear,
                     staffing=staffing, forecast_vs_actual=fva, fva_summary=fva_sum, human_scores=human_scores,
                     events=events, intake_arrivals=i_arr, intake_lead_profile=i_lead, intake_month_mix=i_mix,
                     manifest=manifest)
