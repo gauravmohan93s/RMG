@@ -185,6 +185,12 @@ accuracy for months 1–3 (≥ 3% better) and must not worsen quarters. On 2026-
 so it is off. **Maintenance:** extend the festival dates every year.
 
 ## 7f. One decision rule and the quarterly lock (`src/governance/decisions.py`)
+Since v2.6.0 a switch between two acceptable options needs the same margin as an adoption: in the
+quarter's review (its first run in Jan, Apr, Jul or Oct) the alternative must be at least 3% better than
+the current choice. At any other time, including later runs in the review month, it must be at least 6%
+better. Run-to-run noise in the walk-forward scores is about ±1–2%, so near-ties no longer change the
+published method.
+
 **Rule.** Every component above, and the reconciliation and point estimate, is judged on next-quarter
 totals per level, averaged over levels, and adopted only when at least 3% better. The calendar effects
 are judged on single months instead.

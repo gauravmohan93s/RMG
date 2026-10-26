@@ -3,7 +3,36 @@
 All notable changes are recorded here. Format: [Keep a Changelog](https://keepachangelog.com/);
 versioning: [SemVer](https://semver.org/) as defined in `docs/ROADMAP.md`.
 
-## [2.5.2] — 2026-10-26
+## [2.6.1] — 2026-10-26
+Version stamp and release notes for the 2.6 changes (the `v2.6.0` tag carries the code but still reported
+2.5.2 in outputs).
+
+## [2.6.0] — 2026-10-26
+
+### Changed
+- **Method decisions no longer flip on near-ties** (`governance/decisions.py`).
+  - **Review:** in the quarter's review, a component switches away from its current choice only if the
+    alternative is at least 3% better (the same bar as adopting any component).
+  - **Once per quarter:** the review happens on the first run of the review month. Later runs that quarter
+    need 6%.
+  - **Why:** two runs on the same data on 26 Oct flipped three components on differences of about 2%,
+    which is run-to-run noise. The stored decisions were restored to their September state before the
+    October review; the backup is kept.
+- **One sign convention in the pack:** + = actual came in above the forecast, everywhere (blue = above,
+  orange = below).
+- **Pack pages:**
+  - **Capacity:** adds the offers workload calendar.
+  - **Can we trust it:** plain-language method choices and their evidence, plus accuracy by months
+    ahead for receipts and submissions.
+  - **Accuracy page:** larger charts.
+
+### Fixed
+- `transform-data` did not write `stage_intake_summary.xlsx` (an edit had not been applied), so offers and
+  deposits by intake season were missing. It is now written and covered by a test; the full stage history since
+  2020 was re-extracted by intake on 26 Oct (355,706 rows).
+- No projected final for an intake when its typical share-in exceeds 100%; chart error bars are never negative.
+
+ — 2026-10-26
 
 ### Added
 - **Pipeline chapter: offers and deposits by intake season** (ongoing season, per destination: so far vs last year
