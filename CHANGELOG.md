@@ -3,7 +3,24 @@
 All notable changes are recorded here. Format: [Keep a Changelog](https://keepachangelog.com/);
 versioning: [SemVer](https://semver.org/) as defined in `docs/ROADMAP.md`.
 
-## [2.5.0] — 2026-10-26
+## [2.5.1] — 2026-10-26
+
+### Changed
+- **The intake running indicator now works by intake season,** defined on the intake month (not the month an
+  application was received or changed status): Spring = Jan–Mar, Summer = Apr–Jul, Fall = Aug–Dec intakes.
+  - **Same seasons everywhere:** every destination and region shows the same seasons, so they compare
+    directly. Before, each destination showed its own largest intake month.
+  - **What the pack shows:**
+    - the ongoing season and the next two (Spring 2027, Summer 2027, Fall 2027), side by side;
+    - three booking curves and a destination × season grid (so far, vs last year, likely final);
+    - the closing season (Fall 2026) as a strip;
+    - on each destination's page B, the same grid for its regions.
+  - **Projected final:** shown only where it tested better than last year's final and its 80% range spans
+    at most 2.5×; otherwise "too early".
+  - **Evidence (destinations, November):** at 3 months before a season starts, 14% miss vs 53% for "same as
+    last year"; at 6 months, 34% vs 53%.
+
+ — 2026-10-26
 
 ### Added
 - **Monthly pack rebuilt as a story** (`src/reports/pack.py`).

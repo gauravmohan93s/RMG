@@ -1,27 +1,37 @@
 # -*- coding: utf-8 -*-
 """
-Intake running indicator ("booking curve"): how far each upcoming intake has filled, compared with the same
-intake a year earlier at the same point, and what that implies for its final size.
+Intake running indicator ("booking curve") by intake SEASON: how far each season's intake has filled, compared
+with the same season a year earlier at the same point, and what that implies for its final size.
 
-For one series (organisation, destination or region x metric: Received, Submitted, Offer, Deposit, visa...)
-and one intake I (target intake month, e.g. Sep 2027), with L = months before the intake starts:
-  to date        applications for intake I counted up to the last closed month
-  same point     the same intake a year earlier, counted up to L months before its start
+Seasons are defined on the INTAKE month (the month the student starts), not on the month an application was
+received or changed status:
+    Spring = Jan, Feb, Mar intakes      Summer = Apr, May, Jun, Jul intakes      Fall = Aug - Dec intakes
+The same seasons are used for every destination and region, so they compare directly.
+
+Seen from the last closed month, the seasons are labelled:
+    Closing   the season the current month falls in (e.g. Fall 2026 in Oct 2026): nearly complete
+    Ongoing   the next season to start (Spring 2027): the one being recruited for now
+    Next      the two after it (Summer 2027, Fall 2027)
+
+For one series (organisation, destination or region x metric: Received, Submitted, Offer, Deposit, visa...) and
+one season S, with L = months from the last closed month to the season's first intake month:
+  to date        applications for S's intakes counted up to the last closed month
+  same point     the same season a year earlier, counted up to the same point (12 months earlier)
   pace           to date / same point - 1     (ahead / in line / behind at +-5%)
-  projection     to date / s, s = median share of the final count that the last 3 completed intakes of the
-                 same month already had L months before their start ("final" = counted up to FINAL_AFTER
-                 months after the start)
+  projection     to date / s, s = median share of the final count that the last 3 completed same seasons already
+                 had L months before their start ("final" = counted up to FINAL_AFTER months after the season's
+                 last intake month)
 
-The projection is tested walk-forward on completed intakes: re-made at every lead with only earlier intakes'
-shares and scored against their final count, next to the baseline "same as last year's final". It is
-published for a level x metric x lead only where it beat the baseline by MIN_GAIN_PCT (the common decision
-rule) on at least MIN_TESTS intakes; its range is the 10/90 quantiles of those test errors. Otherwise only the
-pace is shown.
+The projection is tested walk-forward on completed seasons: re-made at every lead with only seasons complete at
+the time and scored against their final count, next to the baseline "same as last year's final". It is published
+for a level x metric x lead only where it beat that baseline by MIN_GAIN_PCT (the common decision rule) on at least
+MIN_TESTS seasons and its range (the 10/90 quantiles of those test errors) spans at most MAX_RANGE_RATIO. Otherwise
+only the pace is shown ("too early to project").
 """
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -29,16 +39,17 @@ import pandas as pd
 from ..data.prepare import ORG, TOTAL
 from .intake import parse_intake_month
 
-FINAL_AFTER = 3            # an intake's count is final 3 months after it starts (late and deferred entries)
-MAX_LEAD = 12              # running intakes: start at most 12 months ahead ...
-MIN_LEAD = -(FINAL_AFTER - 1)   # ... or started up to 2 months ago (still filling)
-SHARE_YEARS = 3            # completed same-month intakes used for the typical share
-MIN_SHARE = 0.10           # too early to project when under 10% of an intake is usually in
+SEASONS = (("Spring", 1, 3), ("Summer", 4, 7), ("Fall", 8, 12))    # name, first and last intake month
+FINAL_AFTER = 3            # a season's count is final 3 months after its last intake month (late / deferred entries)
+MAX_LEAD = 12
+SHARE_YEARS = 3            # completed same seasons used for the typical share
+MIN_SHARE = 0.10           # too early to project when under 10% of a season is usually in
 MIN_GAIN_PCT = 3.0
 MIN_TESTS = 8
+MAX_RANGE_RATIO = 2.5      # a projection whose 80% range spans more than 2.5x is not usable: pace only
 PACE_BAND = 5.0
-MIN_INTAKE = {"Organisation": 100, "Country": 50, "Region": 50}   # last year's intake at least this big
-MIN_INTAKE_SHARE = 0.05    # ... and at least 5% of the series' last-12-month volume
+MIN_INTAKE = {"Organisation": 100, "Country": 30, "Region": 30}   # last year's season at least this big
+SHOW_NEXT = 3              # ongoing + the two after it
 
 
 def _mi(d) -> int:
@@ -48,6 +59,35 @@ def _mi(d) -> int:
 
 def _from_mi(i: int) -> pd.Timestamp:
     return pd.Timestamp(year=i // 12, month=i % 12 + 1, day=1)
+
+
+def season_of(i: int) -> Tuple[int, str, int]:
+    """Intake month index -> (season start month index, season name, season length in months)."""
+    y, m = divmod(i, 12)
+    for name, a, b in SEASONS:
+        if a <= m + 1 <= b:
+            return y * 12 + a - 1, name, b - a + 1
+    raise ValueError(i)
+
+
+def season_label(s: int) -> str:
+    _, name, _ = season_of(s)
+    return f"{name} {s // 12}"
+
+
+def _end(s: int) -> int:
+    start, _, n = season_of(s)
+    return start + n - 1
+
+
+def seasons_in_view(last: int) -> List[Tuple[int, str]]:
+    """[(season start, phase)]: the season containing the last closed month (Closing), then the next SHOW_NEXT."""
+    cur = season_of(last)[0]
+    out, s = [(cur, "Closing")], cur
+    for k in range(SHOW_NEXT):
+        s = _end(s) + 1
+        out.append((s, "Ongoing" if k == 0 else "Next"))
+    return out
 
 
 # ─────────────────────────────── inputs ───────────────────────────────
@@ -96,47 +136,48 @@ def intake_long(intake_df: pd.DataFrame, stage_df: pd.DataFrame = None) -> pd.Da
 
 # ─────────────────────────────── one series ───────────────────────────────
 class _Series:
-    """Counts of one series by intake (month index) and application month (month index)."""
+    """Counts of one series by intake season (season start month index) and application month (month index)."""
 
     def __init__(self, g: pd.DataFrame):
         self.by: Dict[int, Dict[int, float]] = {}
-        for (i, m), a in g.groupby([g["Intake_Start"].map(_mi), g["Date"].map(_mi)])["Apps"].sum().items():
-            self.by.setdefault(int(i), {})[int(m)] = float(a)
+        seas = g["Intake_Start"].map(lambda d: season_of(_mi(d))[0])
+        for (s, m), a in g.groupby([seas, g["Date"].map(_mi)])["Apps"].sum().items():
+            self.by.setdefault(int(s), {})[int(m)] = float(a)
 
-    def cum(self, intake: int, upto: int) -> float:
-        return float(sum(a for m, a in self.by.get(intake, {}).items() if m <= upto))
+    def cum(self, s: int, upto: int) -> float:
+        return float(sum(a for m, a in self.by.get(s, {}).items() if m <= upto))
 
-    def final(self, intake: int) -> float:
-        return self.cum(intake, intake + FINAL_AFTER)
+    def final(self, s: int) -> float:
+        return self.cum(s, _end(s) + FINAL_AFTER)
 
-    def share_hat(self, intake: int, lead: int, known_by: int) -> Tuple[float, int]:
-        """Median share already in at `lead`, over the last SHARE_YEARS same-month intakes complete by `known_by`."""
-        s = []
+    def share_hat(self, s: int, lead: int, known_by: int) -> Tuple[float, int]:
+        """Median share already in at `lead`, over the last SHARE_YEARS same seasons complete by `known_by`."""
+        out = []
         for k in range(1, 8):
-            j = intake - 12 * k
-            if j + FINAL_AFTER > known_by or j not in self.by:
+            j = s - 12 * k
+            if _end(j) + FINAL_AFTER > known_by or j not in self.by:
                 continue
             f = self.final(j)
             if f > 0:
-                s.append(self.cum(j, j - lead) / f)
-            if len(s) == SHARE_YEARS:
+                out.append(self.cum(j, j - lead) / f)
+            if len(out) == SHARE_YEARS:
                 break
-        return (float(np.median(s)), len(s)) if s else (np.nan, 0)
+        return (float(np.median(out)), len(out)) if out else (np.nan, 0)
 
 
 def _backtest(series: Dict[tuple, _Series], last: int) -> pd.DataFrame:
-    """Projection vs 'same as last year's final' on completed intakes, by level x metric x lead."""
+    """Projection vs 'same as last year's final' on completed seasons, by level x metric x lead."""
     recs = []
     for key, s in series.items():
         lvl = key[0]
         for j in s.by:
-            if j + FINAL_AFTER > last or j < last - 12 * 5:
+            if _end(j) + FINAL_AFTER > last or j < last - 12 * 5:
                 continue
             f, ly = s.final(j), s.final(j - 12)
             if f < MIN_INTAKE[lvl] or ly <= 0:
                 continue
-            for lead in range(MIN_LEAD, MAX_LEAD + 1):
-                sh, n = s.share_hat(j, lead, j - lead)       # only intakes complete at that time
+            for lead in range(-(_end(j) - j), MAX_LEAD + 1):
+                sh, n = s.share_hat(j, lead, j - lead)       # only seasons complete at that time
                 if n < 2 or not np.isfinite(sh) or sh < MIN_SHARE:
                     continue
                 p = s.cum(j, j - lead) / sh
@@ -157,53 +198,51 @@ def _backtest(series: Dict[tuple, _Series], last: int) -> pd.DataFrame:
 
 
 def intake_pace(long: pd.DataFrame, last_actual: pd.Timestamp) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Returns (pace table, cumulative curves for charts, projection test)."""
+    """Returns (pace table: one row per series x season in view, cumulative curves for charts, projection test)."""
     if long is None or long.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     last = _mi(last_actual)
-    series, vol12 = {}, {}
-    for key, g in long.groupby(["Level", "Country", "Region", "Metric"]):
-        series[key] = _Series(g)
-        vol12[key] = float(g.loc[g["Date"].map(_mi) > last - 12, "Apps"].sum())
+    series = {key: _Series(g) for key, g in long.groupby(["Level", "Country", "Region", "Metric"])}
     test = _backtest(series, last)
     use = {(r.Level, r.Metric, int(r.Lead)): (r.Q10, r.Q90, r.Projection_Miss_Pct, r.Last_Year_Miss_Pct)
            for r in test.itertuples() if r.Used}
+    view = seasons_in_view(last)
     rows, curves = [], []
     for key, s in series.items():
         lvl, c, reg, met = key
-        for i in sorted(set(s.by) | {j + 12 for j in s.by}):    # incl. intakes with nothing in yet
-            lead = i - last
-            if not MIN_LEAD <= lead <= MAX_LEAD:
+        for st, phase in view:
+            lead = st - last
+            ly = st - 12
+            ly_final = s.final(ly) if _end(ly) + FINAL_AFTER <= last else s.cum(ly, last)
+            if ly_final < MIN_INTAKE[lvl] and s.cum(st, last) < MIN_INTAKE[lvl]:
                 continue
-            ly_final = s.final(i - 12) if i - 12 + FINAL_AFTER <= last else s.cum(i - 12, last)
-            if ly_final < max(MIN_INTAKE[lvl], MIN_INTAKE_SHARE * vol12[key]):
-                continue
-            to_date, same = s.cum(i, last), s.cum(i - 12, last - 12)
+            to_date, same = s.cum(st, last), s.cum(ly, last - 12)
             pace = 100 * (to_date / same - 1) if same > 0 else np.nan
-            sh, _ = s.share_hat(i, lead, last)
+            sh, _ = s.share_hat(st, lead, last)
             proj = lo = hi = miss = base = np.nan
             ev = use.get((lvl, met, lead))
-            if ev is not None and np.isfinite(sh) and sh >= MIN_SHARE and to_date > 0:
+            if ev is not None and np.isfinite(sh) and sh >= MIN_SHARE and to_date > 0 and np.exp(ev[1] - ev[0]) <= MAX_RANGE_RATIO:
                 proj = to_date / sh
                 lo, hi = max(proj * np.exp(ev[0]), to_date), max(proj * np.exp(ev[1]), to_date)
                 miss, base = ev[2], ev[3]
-            rows.append({"Level": lvl, "Country": c, "Region": reg, "Metric": met,
-                         "Intake": f"{_from_mi(i):%b %Y}", "Intake_Start": _from_mi(i), "Months_To_Start": lead,
-                         "To_Date": to_date, "Last_Year_Same_Point": same, "Pace_Pct": pace,
+            _, name, _ = season_of(st)
+            rows.append({"Level": lvl, "Country": c, "Region": reg, "Metric": met, "Intake": season_label(st),
+                         "Season": name, "Season_Year": st // 12, "Season_Start": _from_mi(st), "Phase": phase,
+                         "Months_To_Start": lead, "To_Date": to_date, "Last_Year_Same_Point": same, "Pace_Pct": pace,
                          "Status": ("ahead" if pace >= PACE_BAND else "behind" if pace <= -PACE_BAND else "in line")
                          if np.isfinite(pace) else "new",
                          "Typical_Share_In_Pct": 100 * sh if np.isfinite(sh) else np.nan,
                          "Last_Year_Final": ly_final, "Projected_Final": proj, "Lo80": lo, "Hi80": hi,
                          "Projection_Miss_Pct": miss, "Last_Year_Miss_Pct": base})
             if lvl != "Region":
-                for name, j in (("This intake", i), ("Last year", i - 12), ("Two years ago", i - 24)):
+                for name_, j in (("This intake", st), ("Last year", st - 12), ("Two years ago", st - 24)):
                     if j not in s.by:
                         continue
-                    end = last if j == i else j + FINAL_AFTER
+                    end = last if j == st else _end(j) + FINAL_AFTER
                     for ld in range(15, j - end - 1, -1):
-                        curves.append({"Level": lvl, "Country": c, "Metric": met, "Intake": f"{_from_mi(i):%b %Y}",
-                                       "Series": name, "Months_To_Start": ld, "Cumulative": s.cum(j, j - ld)})
+                        curves.append({"Level": lvl, "Country": c, "Metric": met, "Intake": season_label(st),
+                                       "Series": name_, "Months_To_Start": ld, "Cumulative": s.cum(j, j - ld)})
     pace_df = pd.DataFrame(rows)
     if len(pace_df):
-        pace_df = pace_df.sort_values(["Level", "Country", "Region", "Metric", "Intake_Start"]).reset_index(drop=True)
+        pace_df = pace_df.sort_values(["Level", "Country", "Region", "Metric", "Season_Start"]).reset_index(drop=True)
     return pace_df, pd.DataFrame(curves), test

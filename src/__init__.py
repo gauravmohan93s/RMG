@@ -1,3 +1,3 @@
 """RMG application-flow forecasting pipeline."""
 
-__version__ = "2.5.0"
+__version__ = "2.5.1"

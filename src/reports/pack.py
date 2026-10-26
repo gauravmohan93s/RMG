@@ -148,43 +148,71 @@ def _intake_chart(res, level: str, country: str, metric: str, k: int = 0, size=(
     c = cur[(cur["Level"] == level) & (cur["Country"] == country) & (cur["Metric"] == metric) & (cur["Intake"] == r["Intake"])]
     if c.empty:
         return None
-    return charts.intake_curve(c, r.to_dict(), f"{r['Intake']} intake — applications {metric.lower()} so far",
+    return charts.intake_curve(c, r.to_dict(), f"{r['Intake']} ({r['Phase'].lower()}) — applications {metric.lower()} so far",
                                metric, size=size)
 
 
-def _intake_table(res, S, level: str = "Country", country: str = None, per: int = 2, metric: str = "Received",
-                  max_rows: int = 14):
-    """Running intakes: so far, vs last year at the same point (coloured), likely final with its range."""
+def _short(v) -> str:
+    return charts._k(v) if v is not None and np.isfinite(v) else "–"
+
+
+def _intake_table(res, S, country: str = None, metric: str = "Received", max_rows: int = 14):
+    """Destinations (or one destination's regions) x the ongoing intake season and the next two: so far, pace vs
+    last year at the same point (coloured), likely final with its range where it is tested and usable."""
     p = getattr(res, "intake_pace", None)
-    if p is None or p.empty:
+    if p is None or p.empty or "Phase" not in p:
         return None
-    x = p[(p["Metric"] == metric) & (p["Months_To_Start"] >= 1)]
+    x = p[(p["Metric"] == metric) & p["Phase"].isin(["Ongoing", "Next"])]
+    seasons = list(x.drop_duplicates("Intake").sort_values("Season_Start")[["Intake", "Phase"]].head(3)
+                   .itertuples(index=False, name=None))
     if country is None:
         x = x[x["Level"].isin(["Organisation", "Country"])]
     else:
         x = x[(x["Country"] == country) & x["Level"].isin(["Country", "Region"])]
         if x.loc[x["Level"] == "Region", "Region"].nunique() < 2:      # single region: it is the destination
             x = x[x["Level"] == "Country"]
-    if x.empty:
+    if x.empty or not seasons:
         return None
-    x = x.assign(_o=(x["Level"] != "Organisation").astype(int), _t=(x["Region"] != TOTAL).astype(int))
-    x = x.sort_values(["_o", "Country", "_t", "Region", "Last_Year_Final"], ascending=[True, True, True, True, False])
-    x = x.groupby(["Level", "Country", "Region"], sort=False).head(per)
-    if country is not None:
-        x = x.head(max_rows)
-    hdr = ["Destination" if country is None else "Region / team", "Intake", "Months to go", "So far",
-           "Last year, same point", "Pace", "Likely final (range)", "Last year final"]
-    data, st = [hdr], []
-    for i, r in enumerate(x.itertuples(), start=1):
-        who = _name(r.Level, r.Country) if country is None else ("All regions" if r.Region == TOTAL else r.Region)
-        fin = (f"{_n(r.Projected_Final)}  ({_n(r.Lo80)}–{_n(r.Hi80)})" if np.isfinite(r.Projected_Final)
-               else "too early to project")
-        data.append([who, r.Intake, f"{int(r.Months_To_Start)}", _n(r.To_Date, True), _n(r.Last_Year_Same_Point, True),
-                     _pct(r.Pace_Pct), fin, _n(r.Last_Year_Final)])
-        st.append(("BACKGROUND", (5, i), (5, i), _pace_bg(r.Pace_Pct)))
-        if r.Level == "Organisation" or (country is not None and r.Region == TOTAL):
-            st.append(("FONT", (0, i), (-1, i), "Helvetica-Bold", 7.0))
-    return _table(data, [5.0, 2.2, 2.0, 2.6, 3.4, 2.0, 6.0, 3.2], st, font=7.0)
+    key = ["Level", "Country", "Region"]
+    size = x[x["Intake"] == seasons[0][0]].set_index(key)["Last_Year_Final"]
+    who = x[key].drop_duplicates().copy()
+    who["_o"] = who["Level"].map({"Organisation": 0, "Country": 0 if country is not None else 1, "Region": 1})
+    who["_s"] = [-size.get(k, 0) for k in who[key].itertuples(index=False, name=None)]
+    who = who.sort_values(["_o", "_s"]).head(max_rows)
+    cell = x.set_index(key + ["Intake"])
+    head1 = [""] + sum([[f"{lab}  ({ph.lower()})", "", ""] for lab, ph in seasons], [])
+    head2 = ["Destination" if country is None else "Region / team"] + ["So far", "vs last year", "Likely final"] * len(seasons)
+    data, st = [head1, head2], []
+    for i, k in enumerate(who[key].itertuples(index=False, name=None), start=2):
+        lvl, c, reg = k
+        name = _name(lvl, c) if country is None else ("Whole destination" if reg == TOTAL else reg)
+        row = [name]
+        for j, (lab, _) in enumerate(seasons):
+            col = 1 + 3 * j
+            if (lvl, c, reg, lab) in cell.index:
+                r = cell.loc[(lvl, c, reg, lab)]
+                fin = (f"{_short(r['Projected_Final'])} ({_short(r['Lo80'])}–{_short(r['Hi80'])})"
+                       if np.isfinite(r["Projected_Final"]) else "too early")
+                row += [_n(r["To_Date"], True), _pct(r["Pace_Pct"]), fin]
+                st.append(("BACKGROUND", (col + 1, i), (col + 1, i), _pace_bg(r["Pace_Pct"])))
+            else:
+                row += ["–", "–", "–"]
+        data.append(row)
+        if lvl == "Organisation" or (country is not None and reg == TOTAL):
+            st.append(("FONT", (0, i), (-1, i), "Helvetica-Bold", 6.9))
+    w0 = 5.0
+    w = (FULL_W - w0) / (3 * len(seasons))
+    widths = [w0] + [w * 0.85, w * 0.85, w * 1.3] * len(seasons)
+    t = Table(data, colWidths=[v * cm for v in widths], repeatRows=2)
+    style = [("FONT", (0, 0), (-1, -1), "Helvetica", 6.9), ("FONT", (0, 0), (-1, 1), "Helvetica-Bold", 6.9),
+             ("BACKGROUND", (0, 0), (-1, 1), HEAD), ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("LINEBELOW", (0, 1), (-1, -1), 0.25, LINE),
+             ("TOPPADDING", (0, 0), (-1, -1), 1.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5)]
+    for j in range(len(seasons)):
+        c0 = 1 + 3 * j
+        style += [("SPAN", (c0, 0), (c0 + 2, 0)), ("LINEBEFORE", (c0, 0), (c0, -1), 0.8, NAVY)]
+    t.setStyle(TableStyle(style + st))
+    return t
 
 
 # ───────────────────────────── organisation chapters ─────────────────────────────
@@ -306,25 +334,54 @@ def _ch4_pipeline(res, S) -> List:
     return out + [PageBreak()]
 
 
+def _closing_strip(res, S, metric: str = "Received"):
+    """The season now ending (e.g. Fall 2026): received so far for it vs last year's same season, per destination."""
+    p = getattr(res, "intake_pace", None)
+    if p is None or p.empty or "Phase" not in p:
+        return None
+    x = p[(p["Metric"] == metric) & (p["Phase"] == "Closing") & p["Level"].isin(["Organisation", "Country"])]
+    if x.empty:
+        return None
+    x = x.assign(_o=(x["Level"] != "Organisation").astype(int)).sort_values(["_o", "To_Date"], ascending=[True, False])
+    lab = x["Intake"].iloc[0]
+    small = ParagraphStyle("c", fontName="Helvetica-Bold", fontSize=6.6, leading=7.6, alignment=1)
+    names = [Paragraph(_name(r.Level, r.Country), small) for r in x.itertuples()]
+    data = [[f"{lab} (closing)"] + names,
+            ["So far"] + [_n(v, True) for v in x["To_Date"]],
+            ["vs last year, same point"] + [_pct(v) for v in x["Pace_Pct"]]]
+    w0 = 3.6
+    t = Table(data, colWidths=[w0 * cm] + [(FULL_W - w0) / len(names) * cm] * len(names))
+    st = [("FONT", (0, 0), (-1, -1), "Helvetica", 6.9), ("FONT", (0, 0), (0, -1), "Helvetica-Bold", 6.9),
+          ("BACKGROUND", (0, 0), (-1, 0), HEAD), ("ALIGN", (1, 0), (-1, -1), "CENTER"), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+          ("LINEBELOW", (0, 0), (-1, -1), 0.25, LINE), ("TOPPADDING", (0, 0), (-1, -1), 1.6),
+          ("BOTTOMPADDING", (0, 0), (-1, -1), 1.6)]
+    st += [("BACKGROUND", (j, 2), (j, 2), _pace_bg(v)) for j, v in enumerate(x["Pace_Pct"], start=1)]
+    t.setStyle(TableStyle(st))
+    return t
+
+
 def _ch4_intakes(res, S) -> List:
     rows = ins.intake_rows(res)
     if rows.empty:
         return []
     r = rows.iloc[0]
-    sub = (f"{r['Intake']} intake: {_n(r['To_Date'])} received so far, {_pct(r['Pace_Pct'])} vs last year at the same "
+    sub = (f"{r['Intake']} (ongoing): {_n(r['To_Date'])} received so far, {_pct(r['Pace_Pct'])} vs last year at the same "
            "point" + (f"; likely final {_n(r['Projected_Final'])}." if np.isfinite(r["Projected_Final"]) else "."))
-    imgs = [_intake_chart(res, "Organisation", ORG, "Received", 0, size=(6.4, 2.6)),
-            _intake_chart(res, "Organisation", ORG, "Received", 1, size=(6.4, 2.6))]
-    out = [_band("4", "The coming intakes", sub, res, S), Spacer(0, 5),
-           _row([_img(i, HALF) if i else "" for i in imgs], [HALF + 0.3, HALF]), Spacer(0, 5)]
+    imgs = [_intake_chart(res, "Organisation", ORG, "Received", k, size=(6.4, 3.6)) for k in range(3)]
+    out = [_band("4", "The coming intakes — ongoing season and the next two", sub, res, S), Spacer(0, 5),
+           _row([_img(i, THIRD) if i else "" for i in imgs], [THIRD + 0.3] * 3), Spacer(0, 5)]
     t = _intake_table(res, S)
     if t is not None:
         out.append(t)
+    cl = _closing_strip(res, S)
+    if cl is not None:
+        out += [Spacer(0, 8), cl]
     out.append(Paragraph(
-        "Applications for each intake counted so far, against the same intake a year earlier at the same number of "
-        "months before its start (blue = ahead, orange = behind). Likely final = so far ÷ the share that the last three "
-        "intakes of that month already had at this point; shown only where that tested better than 'same as last "
-        "year' on past intakes, with the range those tests give (8 in 10).", S["note"]))
+        "Intake seasons by intake month: Spring = Jan–Mar, Summer = Apr–Jul, Fall = Aug–Dec intakes. So far = applications "
+        "for that season's intakes received up to now; vs last year = against the same season a year earlier at the same "
+        "point (blue = ahead, orange = behind). Likely final = so far ÷ the share the last three seasons had at this "
+        "point; shown only where that tested better than 'same as last year' and its range (8 in 10) is usable.",
+        S["note"]))
     return out + [PageBreak()]
 
 
@@ -433,7 +490,7 @@ def _destination_b(res, S, country: str, label: str) -> List:
                                             size=(6.4, 2.9)), HALF)
         out.append(_row([rt, mult], [HALF + 0.3, HALF]))
     else:
-        it = _intake_table(res, S, "Country", country, per=3)
+        it = _intake_table(res, S, country)
         out.append(it if it is not None else Paragraph("Single region: the destination page shows it in full.", S["note"]))
     fva = getattr(res, "forecast_vs_actual", None)
     cells = [_img(charts.funnel(_funnel_steps(res, country, "Country"), "Pipeline — next quarter", size=(6.4, 3.4)), THIRD)]
@@ -444,12 +501,12 @@ def _destination_b(res, S, country: str, label: str) -> List:
     out += [Spacer(0, 6), _row(cells, [THIRD + 0.3] * 3)]
     if rt is None:                                   # single region: a second row instead of the region view
         more = [_intake_chart(res, "Country", country, "Received", 1, size=(6.4, 3.4)),
-                _intake_chart(res, "Country", country, "Submitted", 0, size=(6.4, 3.4)),
+                _intake_chart(res, "Country", country, "Received", 2, size=(6.4, 3.4)),
                 charts.track_record(fva, "Country", country, "Submitted", "Track record — submitted", size=(6.4, 3.4))
                 if fva is not None and len(fva) else None]
         out += [Spacer(0, 6), _row([_img(m, THIRD) if m else "" for m in more], [THIRD + 0.3] * 3)]
     if rt is not None:
-        it = _intake_table(res, S, "Country", country, per=1, max_rows=7)
+        it = _intake_table(res, S, country, max_rows=8)
         if it is not None:
             out += [Spacer(0, 5), it]
     return out + [PageBreak()]

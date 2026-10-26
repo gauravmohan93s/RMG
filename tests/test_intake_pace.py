@@ -3,14 +3,14 @@ import pandas as pd
 
 from src.analysis import intake_pace as ip
 
-# every Sep intake fills the same way: 10% of its final count arrives in each of the 10 months before the
-# start (leads 10..1); the size grows 20% a year, so the right answer is always "+20%, final = 1.2 x last year"
+# every Sep intake (a Fall intake) fills the same way: 10% of its final count arrives in each of the 10 months
+# before Sep; the size grows 20% a year, so the right answer is always "+20%, final = 1.2 x last year"
 CURVE = {lead: 0.10 for lead in range(1, 11)}
 
 
 def _cleaned(last="2026-10-01", years=range(2020, 2028)):
     rows = []
-    for country in ("UK", "Canada", "Australia"):        # enough completed intakes for the evidence gate
+    for country in ("UK", "Canada", "Australia"):        # enough completed seasons for the evidence gate
         for y in years:
             start = pd.Timestamp(f"{y}-09-01")
             size = 1000 * 1.2 ** (y - 2020)
@@ -22,19 +22,27 @@ def _cleaned(last="2026-10-01", years=range(2020, 2028)):
     return pd.DataFrame(rows)
 
 
+def test_seasons_are_defined_on_the_intake_month():
+    assert [ip.season_of(ip._mi(f"2027-{m:02d}-01"))[1] for m in range(1, 13)] == \
+        ["Spring"] * 3 + ["Summer"] * 4 + ["Fall"] * 5
+    view = [(ip.season_label(s), p) for s, p in ip.seasons_in_view(ip._mi("2026-10-01"))]
+    assert view == [("Fall 2026", "Closing"), ("Spring 2027", "Ongoing"), ("Summer 2027", "Next"), ("Fall 2027", "Next")]
+
+
 def test_pace_and_projection_recover_the_truth():
     pace, curves, test = ip.intake_pace(ip.intake_long(_cleaned()), pd.Timestamp("2026-10-01"))
-    sep27 = pace[(pace["Level"] == "Country") & (pace["Metric"] == "Received") & (pace["Intake"] == "Sep 2027")]
-    assert sep27["Months_To_Start"].iloc[0] == 11 and sep27["To_Date"].iloc[0] == 0   # nothing in yet
+    f27 = pace[(pace["Level"] == "Country") & (pace["Metric"] == "Received") & (pace["Intake"] == "Fall 2027")]
+    assert f27["Phase"].iloc[0] == "Next" and f27["Months_To_Start"].iloc[0] == 10 and f27["To_Date"].iloc[0] == 0
 
-    # seen from April 2027 (5 months before the start): leads 10..5 are in (60%), pace +20%, final = 1.2 x last year
+    # seen from April 2027 (Fall 2027 starts in Aug, 4 months on): 6 of 10 months are in (60%), pace +20%
     p, c, t = ip.intake_pace(ip.intake_long(_cleaned(last="2027-04-01")), pd.Timestamp("2027-04-01"))
-    r = p[(p["Country"] == "UK") & (p["Level"] == "Country") & (p["Metric"] == "Received") & (p["Intake"] == "Sep 2027")].iloc[0]
+    r = p[(p["Country"] == "UK") & (p["Level"] == "Country") & (p["Metric"] == "Received") & (p["Intake"] == "Fall 2027")].iloc[0]
+    assert r["Phase"] == "Ongoing" and r["Months_To_Start"] == 4
     assert np.isclose(r["Pace_Pct"], 20.0) and r["Status"] == "ahead"
     assert np.isclose(r["Typical_Share_In_Pct"], 60.0)
     assert np.isclose(r["Projected_Final"], 1000 * 1.2 ** 7, rtol=1e-6)   # tested: exact shares beat "last year"
     assert r["Lo80"] <= r["Projected_Final"] <= r["Hi80"]
-    assert t[(t["Level"] == "Country") & (t["Lead"] == 5) & (t["Metric"] == "Received")]["Used"].iloc[0]
+    assert t[(t["Level"] == "Country") & (t["Lead"] == 4) & (t["Metric"] == "Received")]["Used"].iloc[0]
     assert set(c["Series"]) == {"This intake", "Last year", "Two years ago"}
     assert set(p["Level"]) == {"Organisation", "Country", "Region"}
 

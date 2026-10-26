@@ -432,14 +432,15 @@ def last_month(res, level: str = "Organisation", country: str = ORG, metric: str
 
 def intake_rows(res, level: str = "Organisation", country: str = ORG, metric: str = "Received",
                 ahead_only: bool = True) -> pd.DataFrame:
-    """Running intakes for one series, biggest first (intakes still to start when ahead_only)."""
+    """Intake seasons in view for one series, in calendar order (the ongoing season and the next two when
+    ahead_only; the closing season too otherwise)."""
     p = getattr(res, "intake_pace", None)
     if p is None or p.empty:
         return pd.DataFrame()
-    x = p[(p["Level"] == level) & (p["Country"] == country) & (p["Metric"] == metric)]
+    x = p[(p["Level"] == level) & (p["Country"] == country) & (p["Metric"] == metric) & (p["Region"] == TOTAL)]
     if ahead_only:
-        x = x[x["Months_To_Start"] >= 1]
-    return x.sort_values("Last_Year_Final", ascending=False)
+        x = x[x["Phase"].isin(["Ongoing", "Next"])]
+    return x.sort_values("Season_Start")
 
 
 def story_messages(res, level: str = "Organisation", country: str = ORG, n: int = 4) -> List[str]:
@@ -481,8 +482,8 @@ def story_messages(res, level: str = "Organisation", country: str = ORG, n: int 
     it = intake_rows(res, level, country)
     if len(it):
         r = it.iloc[0]
-        s = (f"<b>{r['Intake']} intake</b> ({int(r['Months_To_Start'])} months to go): {_round(r['To_Date'], 10)} received "
-             f"so far, {_p0(r['Pace_Pct'])} vs last year at the same point")
+        s = (f"<b>{r['Intake']} intake</b> (ongoing, starts in {int(r['Months_To_Start'])} months): "
+             f"{_round(r['To_Date'], 10)} received so far, {_p0(r['Pace_Pct'])} vs last year at the same point")
         if np.isfinite(r.get("Projected_Final", np.nan)):
             s += f"; likely final {_round(r['Projected_Final'])} (last year {_round(r['Last_Year_Final'])})"
         out.append(s + ".")

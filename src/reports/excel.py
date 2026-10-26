@@ -435,15 +435,16 @@ def write_workbook(res, path: Path) -> Path:
                          "(snaive), the conversion chain and their blend. Chosen = used (must beat snaive by >= 3%).")
     ipace = getattr(res, "intake_pace", None)
     if ipace is not None and len(ipace):
-        cols = ["Level", "Country", "Region", "Metric", "Intake", "Months_To_Start", "To_Date", "Last_Year_Same_Point",
+        cols = ["Level", "Country", "Region", "Metric", "Intake", "Phase", "Months_To_Start", "To_Date", "Last_Year_Same_Point",
                 "Pace_Pct", "Status", "Typical_Share_In_Pct", "Projected_Final", "Lo80", "Hi80", "Last_Year_Final",
                 "Projection_Miss_Pct", "Last_Year_Miss_Pct"]
         b.table("Intake Running", ipace[[c for c in cols if c in ipace.columns]],
                 formats={c: "int" for c in ("To_Date", "Last_Year_Same_Point", "Projected_Final", "Lo80", "Hi80",
                                             "Last_Year_Final")} | {c: "pct_plain" for c in ("Pace_Pct",
                                             "Typical_Share_In_Pct", "Projection_Miss_Pct", "Last_Year_Miss_Pct")},
-                note="Each running intake: applications for it counted so far vs the same intake a year earlier at the "
-                     "same number of months before its start (pace). Projected final = so far / the share the last three "
+                note="Each intake season (by intake month: Spring Jan-Mar, Summer Apr-Jul, Fall Aug-Dec; Closing = the "
+                     "season of the current month, Ongoing = the next to start, Next = the two after): applications so "
+                     "far vs the same season a year earlier at the same point (pace). Projected final = so far / the share the last three "
                      "same-month intakes had at this point, only where that tested better than 'same as last year'.")
         itest = getattr(res, "intake_pace_test", None)
         if itest is not None and len(itest):
