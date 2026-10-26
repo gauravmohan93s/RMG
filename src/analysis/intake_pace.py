@@ -221,7 +221,8 @@ def intake_pace(long: pd.DataFrame, last_actual: pd.Timestamp) -> Tuple[pd.DataF
             sh, _ = s.share_hat(st, lead, last)
             proj = lo = hi = miss = base = np.nan
             ev = use.get((lvl, met, lead))
-            if ev is not None and np.isfinite(sh) and sh >= MIN_SHARE and to_date > 0 and np.exp(ev[1] - ev[0]) <= MAX_RANGE_RATIO:
+            if (ev is not None and np.isfinite(sh) and MIN_SHARE <= sh <= 1 and to_date > 0
+                    and np.exp(ev[1] - ev[0]) <= MAX_RANGE_RATIO):
                 proj = to_date / sh
                 lo, hi = max(proj * np.exp(ev[0]), to_date), max(proj * np.exp(ev[1]), to_date)
                 miss, base = ev[2], ev[3]

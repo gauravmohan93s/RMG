@@ -474,8 +474,8 @@ def intake_curve(curves: pd.DataFrame, pace: dict, title: str, metric: str = "Re
     pf = pace.get("Projected_Final", np.nan)
     if np.isfinite(pf):
         x_end = -2
-        ax.errorbar([x_end], [pf], yerr=[[pf - pace["Lo80"]], [pace["Hi80"] - pf]], fmt="o", color=color, ms=4,
-                    capsize=3, lw=1)
+        ax.errorbar([x_end], [pf], yerr=[[max(pf - pace["Lo80"], 0)], [max(pace["Hi80"] - pf, 0)]], fmt="o",
+                    color=color, ms=4, capsize=3, lw=1)
         ax.annotate(f"likely final {_k(pf)}", (x_end, pf), textcoords="offset points", xytext=(-4, 8), ha="right",
                     fontsize=6.4, color=color)
         top = max(top, float(pace["Hi80"]))

@@ -233,48 +233,52 @@ def _ch2_accuracy(res, S) -> List:
               [f"{_n(lm['Actual'])} received vs {_n(lm['Forecast'])} forecast" if lm else "", "+ = more than forecast"],
               S, w),
         _tile(f"Last quarter (forecast made {made:%b %Y})" if made is not None else "Last quarter",
-              _pct(-org["Miss_Pct"].iloc[0]) if len(org) else "–",
+              _pct(100 * (org["Actual_Total"].iloc[0] / org["Forecast_Total"].iloc[0] - 1)) if len(org) else "–",
               [f"{_n(org['Actual_Total'].iloc[0])} actual vs {_n(org['Forecast_Total'].iloc[0])} forecast" if len(org) else "",
                "+ = more than forecast"], S, w),
         _tile("Typical miss on a quarter (tested)", f"±{err:.0f}%" if np.isfinite(err) else "–",
               [f"forecasts re-made for {ins.wf_period(res)}"], S, w),
         _tile("Plan-for range held (tested)", f"{cov:.0f}%" if np.isfinite(cov) else "–", ["of quarters; aim 80%"], S, w)]
+    # one sign convention on every page: + = actual came in ABOVE the forecast (blue), - = below (orange)
+    av = lambda miss: 100 * (100 / (100 + miss) - 1) if np.isfinite(miss) and miss > -100 else np.nan
     left = None
     if len(pr):
-        data, st = [["Last quarter", "Forecast", "Actual", "Miss"]], []
+        data, st = [["Last quarter", "Forecast", "Actual", "Actual vs forecast"]], []
         for i, r in enumerate(pr.itertuples(), start=1):
             small = r.Actual_Total < 5000
-            data.append([_name(r.Level, r.Country), _n(r.Forecast_Total, small), _n(r.Actual_Total, small), _pct(r.Miss_Pct)])
-            bg = next(c for lim, c in MISS_BG if abs(r.Miss_Pct) <= lim) if np.isfinite(r.Miss_Pct) else REL_BG["New"]
+            a = av(r.Miss_Pct)
+            data.append([_name(r.Level, r.Country), _n(r.Forecast_Total, small), _n(r.Actual_Total, small), _pct(a)])
+            bg = next(c for lim, c in MISS_BG if abs(a) <= lim) if np.isfinite(a) else REL_BG["New"]
             st += [("BACKGROUND", (3, i), (3, i), bg), ("TEXTCOLOR", (3, i), (3, i), colors.white)]
             if r.Level == "Organisation":
                 st.append(("FONT", (0, i), (-1, i), "Helvetica-Bold", 7.0))
-        left = _table(data, [5.2, 2.6, 2.6, 2.4], st, font=7.0)
+        left = _table(data, [5.2, 2.6, 2.6, 2.6], st, font=7.0)
     right = None
     d = ins.vintage_matrix(res, metric="Received")
     if len(d):
         vcols = [c for c in d.columns if c not in ("Destination", "Level")]
-        data, st = [["Miss by forecast made in"] + [c.replace("->", "for") for c in vcols]], []
+        data, st = [["Actual vs forecast made in"] + [c.replace("->", "for") for c in vcols]], []
         for i, r in enumerate(d.itertuples(index=False), start=1):
-            vals = [r[2 + j] for j in range(len(vcols))]
+            vals = [av(r[2 + j]) for j in range(len(vcols))]
             data.append([r[0]] + [_pct(v) for v in vals])
             for j, v in enumerate(vals, start=1):
-                st.append(("BACKGROUND", (j, i), (j, i), _miss_bg(v)))
+                st.append(("BACKGROUND", (j, i), (j, i), _miss_bg(-v)))
             if r[1] == "Organisation":
                 st.append(("FONT", (0, i), (-1, i), "Helvetica-Bold", 7.0))
         w0 = 4.0
         right = _table(data, [w0] + [(HALF - w0) / len(vcols)] * len(vcols), st, font=6.6)
     fva = res.forecast_vs_actual
     ch = [_img(charts.track_record(fva, "Organisation", ORG, m, f"Track record — applications {m.lower()}",
-                                   size=(6.4, 2.2)), HALF) for m in ("Received", "Submitted")]
+                                   size=(6.4, 2.6)), HALF) for m in ("Received", "Submitted")]
     out = [_band("2", "Last month and how accurate we have been",
                  "What we forecast against what happened: last month, the last full quarter, and every recent forecast.",
                  res, S), Spacer(0, 5), _row(tiles, [w + 0.08] * 4), Spacer(0, 6)]
     if left is not None or right is not None:
         out.append(_row([left or "", right or ""], [HALF + 0.3, HALF]))
-        out.append(Paragraph("Left: quarter forecast re-made at the time with today's method; green within 10%, amber 10–20%, "
-                             "red over 20% (− = actual came in higher). Right: each forecast's miss on the months since; blue "
-                             "= actual higher, orange = lower, darker = bigger.", S["note"]))
+        out.append(Paragraph("+ = actual came in above the forecast, − = below, everywhere in this pack. Left: quarter "
+                             "forecast re-made at the time with today's method; green within 10%, amber 10–20%, red over "
+                             "20%. Right: each recent forecast against the months since; blue = actual above, orange = "
+                             "below, darker = bigger.", S["note"]))
     return out + [Spacer(0, 5), _row(ch, [HALF + 0.3, HALF]), PageBreak()]
 
 
@@ -421,10 +425,13 @@ def _ch5_capacity(res, S) -> List:
         return []
     out = [_band("5", "Capacity", "Busy and quiet months ahead for each destination, so staffing can be planned before "
                  "the peak.", res, S), Spacer(0, 4)]
-    for m in ("Received", "Submitted"):
+    mets = [m for m in ("Received", "Submitted", "Offer") if (st["Metric"] == m).any()]
+    h = 3.2 if len(mets) < 3 else 2.05
+    for m in mets:
+        what = f"Applications {m.lower()}" if m != "Offer" else "Offers"
         out.append(_img(charts.workload_heatmap(
-            st, m, f"Applications {m.lower()} per month.  Blue = busier than that destination's average month, "
-                   "grey = quieter; bold = at least 10% busier.", size=(13.2, 3.2)), FULL_W))
+            st, m, f"{what} per month.  Blue = busier than that destination's average month, grey = quieter; bold = at "
+                   "least 10% busier.", size=(13.2, h)), FULL_W))
     t = _fte_table(res)
     out += ([Spacer(0, 4), t] if t is not None else
             [Paragraph("FTE needed appears here once destination teams enter today's headcount per stage in their live "
@@ -435,7 +442,12 @@ def _ch5_capacity(res, S) -> List:
 METHOD_LABEL = {"statistical_overlay": "Correction for recent over/under-forecasting",
                 "point_estimate": "Single number taken from the forecast range", "submitted_funnel": "Submissions forecast",
                 "reconciliation": "Regions add up to destinations", "vintage_signal": "Direction signal from latest forecasts",
+                "direction_signal": "Direction signal from latest forecasts",
                 "calendar_effects": "Working-day and festival effects", "hedge": "Hedge with last year where models lose"}
+CHOICE_LABEL = {"decay": "on — recent months count more", "level": "on — flat", "none": "off", "off": "off", "on": "on",
+                "median": "middle of the range", "mean": "average of the range", "blend": "receipts funnel + models",
+                "funnel": "from receipts", "model": "models only", "bottom_up": "sum of regions",
+                "middle_out": "from destinations", "wls_var": "weighted", "mint_shrink": "optimal combination"}
 
 
 def _ch6_trust(res, S) -> List:
@@ -444,11 +456,13 @@ def _ch6_trust(res, S) -> List:
     dec = getattr(res, "decisions", None)
     if dec is not None and len(dec):
         small = ParagraphStyle("x", fontName="Helvetica", fontSize=6.8, leading=8.2)
-        data = [["What the method uses", "Used", "Test favours", "Decided", "Why (next-quarter error, % — lower is better)"]]
+        data = [["What the method uses", "Used", "Decided", "Evidence: next-quarter error of each option, % (lower is better)"]]
         for r in dec.itertuples():
-            data.append([METHOD_LABEL.get(r.Component, r.Component), str(r.Used), str(r.Test_Favours), str(r.Decided_On),
-                         Paragraph(str(r.Scores), small)])
-        out += [_table(data, [7.0, 2.6, 2.6, 2.4, FULL_W - 14.6], font=7.0, align="LEFT"),
+            ev = "; ".join(f"{CHOICE_LABEL.get(k, k)} {v}" for k, v in
+                           (x.strip().rsplit(" ", 1) for x in str(r.Scores).split(",") if " " in x.strip()))
+            data.append([METHOD_LABEL.get(r.Component, r.Component), CHOICE_LABEL.get(str(r.Used), str(r.Used)),
+                         str(r.Decided_On), Paragraph(ev, small)])
+        out += [_table(data, [7.0, 5.0, 2.4, FULL_W - 14.4], font=7.0, align="LEFT"),
                 Paragraph("Every component must make next-quarter totals at least 3% more accurate in the walk-forward "
                           "test to be used; choices are locked for a quarter and reviewed in Jan, Apr, Jul and Oct.", S["note"])]
     rs = ins.reliability_summary(res)
@@ -456,11 +470,14 @@ def _ch6_trust(res, S) -> List:
         data = [["Reliability (regions)", "Series", "Share of forecast volume"]]
         for r in rs.itertuples():
             data.append([r.Reliability, str(r.Series), f"{r.Volume_Share_Pct:.0f}%"])
-        rel = _table(data, [4.2, 2.6, 4.2], font=7.0)
+        rel = _table(data, [3.4, 1.8, 3.4], font=7.0)
         acc = getattr(res, "accuracy", None)
-        img = (_img(charts.accuracy_by_horizon(acc, "Received", "Country", size=(6.4, 2.5)), HALF)
-               if acc is not None and len(acc) else "")
-        out += [Spacer(0, 6), _row([rel, img], [HALF + 0.3, HALF])]
+        imgs = [_img(charts.accuracy_by_horizon(acc, m, "Country", size=(6.4, 3.3)), THIRD + 0.6) if acc is not None and len(acc)
+                else "" for m in ("Received", "Submitted")]
+        out += [Spacer(0, 6), _row([[rel, Spacer(0, 4), Paragraph(
+            "Share of next-12-month volume by how reliable its region's forecast has been in testing. Right: average "
+            "monthly error by months ahead for destinations — the method against 'same month last year'.", S["note"])]]
+            + imgs, [8.9, THIRD + 0.9, THIRD + 0.6])]
     return out + [PageBreak()]
 
 

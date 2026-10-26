@@ -18,7 +18,6 @@ INTAKE_FINAL_PATH = BASE_DIR / "intake_final_summary.xlsx"
 STAGE_PATH        = BASE_DIR / "monthly_stage_summary.xlsx"
 STAGE_FINAL_PATH  = BASE_DIR / "stage_final_summary.xlsx"
 STAGE_INTAKE_PATH = BASE_DIR / "stage_intake_summary.xlsx"
-STAGE_INTAKE_PATH = BASE_DIR / "stage_intake_summary.xlsx"
 # ─────────────────────────────────────────────────────────────────────────────
 
 def generate_final_summary() -> Tuple[List[int], List[int]]:
@@ -174,12 +173,19 @@ def generate_stage_summary() -> bool:
     if not STAGE_PATH.exists():
         print(f"ℹ️  No stage extract at {STAGE_PATH} (fill STAGE_GROUPS in fetch_data.py) — skipping stage summary.")
         return False
-    df = pd.read_excel(STAGE_PATH, dtype={"ReportMonth": str, "StageGroup": str}).rename(columns={"ReportMonth": "Month"})
+    df = pd.read_excel(STAGE_PATH, dtype={"ReportMonth": str, "StageGroup": str, "Intake": str, "InYear": str}
+                       ).rename(columns={"ReportMonth": "Month"})
     df["Apps"] = pd.to_numeric(df["Apps"], errors="coerce").fillna(0)
     df = _map_ids(df)
     out = (df.groupby(["Month", "Country Grouped", "RegionName", "StageGroup"], as_index=False)["Apps"].sum()
              .rename(columns={"RegionName": "Name of Region"}))
     out.to_excel(STAGE_FINAL_PATH, index=False)
+    if {"Intake", "InYear"}.issubset(df.columns):          # the same counts by target intake (intake running view)
+        df[["Intake", "InYear"]] = df[["Intake", "InYear"]].fillna("")
+        it = (df.groupby(["Month", "Country Grouped", "RegionName", "StageGroup", "Intake", "InYear"], as_index=False)
+                ["Apps"].sum().rename(columns={"RegionName": "Name of Region"}))
+        it.to_excel(STAGE_INTAKE_PATH, index=False)
+        print(f"✅ Stage-by-intake summary written to {STAGE_INTAKE_PATH} ({len(it)} rows)")
     print(f"✅ Stage summary written to {STAGE_FINAL_PATH} ({len(out)} rows, stages: "
           f"{', '.join(sorted(out['StageGroup'].unique()))})")
     return True
