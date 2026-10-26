@@ -38,11 +38,24 @@ How to read the ranges: "most likely" = the actual lands inside it about 1 time 
 """
 
 
+def _clear(path: Path) -> None:
+    """Remove a folder; when Windows / OneDrive holds a lock on it, remove what it can and carry on
+    (the copy then overwrites the files in place)."""
+    try:
+        shutil.rmtree(path)
+    except PermissionError:
+        for p in sorted(path.rglob("*"), reverse=True):
+            try:
+                p.unlink() if p.is_file() else p.rmdir()
+            except OSError:
+                pass
+
+
 def _copy(src: Path, dst: Path) -> None:
     if src.is_dir():
         if dst.exists():
-            shutil.rmtree(dst)
-        shutil.copytree(src, dst)
+            _clear(dst)
+        shutil.copytree(src, dst, dirs_exist_ok=True)
     else:
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
@@ -60,7 +73,7 @@ def publish(res, report_dir: Path, outcomes_root: Path, version: str) -> Dict[st
     out = {}
     for target in (outcomes_root / label, outcomes_root / "Latest"):
         if target.name == "Latest" and target.exists():
-            shutil.rmtree(target)                       # Latest = exactly the newest pack, nothing stale
+            _clear(target)                              # Latest = exactly the newest pack, nothing stale
         target.mkdir(parents=True, exist_ok=True)
         for f in files:
             _copy(f, target / f.name)

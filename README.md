@@ -39,7 +39,7 @@ Full detail: [docs/METHODOLOGY.md](docs/METHODOLOGY.md); evidence: [docs/experim
 python -m venv .venv_3.12
 .venv_3.12\Scripts\activate
 pip install -r requirements-dev.txt
-python -m pytest                          # 78 tests, synthetic data only
+python -m pytest                          # 82 tests, synthetic data only
 python run_pipeline.py all                # fetch -> transform -> forecast -> report -> publish -> forms (~25 min)
 ```
 
@@ -75,7 +75,7 @@ fetch_data.py, transform_data.py   SQL extract (26th-25th cycles, incl. stage da
 
 ## Versioning
 Semantic versioning; the version (`src/__init__.py`) is stamped into every output. Releases are git
-tags (`v1.0.0` legacy pipeline, `v2.0.0` this engine, `v2.3.0` current). See
+tags (`v1.0.0` legacy pipeline, `v2.0.0` this engine, `v2.3.1` current). See
 [CHANGELOG.md](CHANGELOG.md) and the plan in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Extending

@@ -3,6 +3,24 @@
 All notable changes are recorded here. Format: [Keep a Changelog](https://keepachangelog.com/);
 versioning: [SemVer](https://semver.org/) as defined in `docs/ROADMAP.md`.
 
+## [2.3.1] — 2026-10-26
+
+### Fixed
+- **Stage upstream chosen per destination.** Each stage is now forecast from the earlier stage (Submitted,
+  Offer, Deposit, ...) that tested best for that destination, among upstreams converting at most 105%.
+  Previously one upstream was used for every destination, giving impossible conversions where the
+  milestone order differs (Visa document from Deposit: Australia 210%, USA 133%). Australia and the USA
+  now chain from Offer (39%). Walk-forward quarter error is equal or better (Visa applied 26% vs 39% for
+  last year's pattern). The November run's stage files were recomputed; the main forecast is unchanged.
+- **Country pages fit on one page** (chart heights reduced): the pack is 19 pages again, not 30.
+- **Publish survives locked files**: when OneDrive or an open PDF locks `Outcomes/Latest`, files are
+  overwritten in place instead of failing.
+- **Run manifest records the git commit** when the scheduler has no git executable on PATH (read from `.git`).
+
+### Changed
+- `publish` also creates the country input forms (`Forms/<YYYY-MM>/To_Send`), so the orchestrator's
+  separate steps deliver them.
+
 ## [2.3.0] — 2026-10-25
 
 ### Added

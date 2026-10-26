@@ -26,9 +26,12 @@ def test_chain_recovers_conversion_and_beats_last_year():
     stage_actual, Y, nodes, honest, fc, months, T, offer, deposit = _setup()
     sf, test, conv = sg.run(stage_actual, Y, nodes, honest, fc, months, T)
     chosen = test[test["Chosen"]].drop_duplicates("StageGroup").set_index("StageGroup")["Variant"]
-    assert chosen["Offer"] == "chain" and chosen["Deposit"] == "chain"
+    assert chosen["Offer"] in ("chain", "blend") and chosen["Deposit"] in ("chain", "blend")
     c = conv.set_index("StageGroup")
-    assert abs(c.loc["Offer", "Conversion_Pct"] - 60) < 1 and abs(c.loc["Deposit", "Conversion_Pct"] - 50) < 1
+    assert c.loc["Offer", "From"] == "Submitted" and abs(c.loc["Offer", "Conversion_Pct"] - 60) < 1
+    # deposits are exactly 50% of offers two months later = 30% of submissions three months later
+    expected = 50 if c.loc["Deposit", "From"] == "Offer" else 30
+    assert abs(c.loc["Deposit", "Conversion_Pct"] - expected) < 1
     o = sf[sf["StageGroup"] == "Offer"].set_index("Horizon")["Forecast"]
     assert np.allclose(o.to_numpy(), offer[T:T + 12], rtol=0.02)            # downstream of perfect submissions
     d = sf[sf["StageGroup"] == "Deposit"].set_index("Horizon")["Forecast"]

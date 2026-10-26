@@ -105,13 +105,18 @@ def report_cmd(run_date: RunDate = None) -> None:
 
 @app.command("publish")
 def publish_cmd(run_date: RunDate = None) -> None:
-    """Copy a run's pack, country PDFs, workbook and input form to the executive Outcomes folder."""
+    """Copy a run's reports to the executive Outcomes folder and create the country input forms."""
     from src.forecasting.engine import load_result
+    from src.reports.forms import make_forms
     from src.reports.publish import publish
     rd = _run_date(run_date)
     out = run_dir(rd)
-    for name, p in publish(load_result(out), out / "Reports", OUTCOMES_ROOT, __version__).items():
+    res = load_result(out)
+    for name, p in publish(res, out / "Reports", OUTCOMES_ROOT, __version__).items():
         typer.echo(f"  published ({name}): {p}")
+    folder = DATA_ROOT / "Forms" / pd_month(res)
+    files = make_forms(res, folder)          # forms are part of delivering the month's outputs
+    typer.echo(f"  {len(files)} country input forms in {folder / 'To_Send'}")
 
 
 def _latest_run() -> Path:
@@ -164,7 +169,7 @@ def all_cmd(
     skip_transform: Annotated[bool, typer.Option("--skip-transform", help="Use the existing final summary.")] = False,
     interactive: Annotated[bool, typer.Option("--interactive")] = False,
 ) -> None:
-    """Full monthly run: fetch -> transform -> forecast -> report -> publish -> country input forms."""
+    """Full monthly run: fetch -> transform -> forecast -> report -> publish (incl. country input forms)."""
     if not skip_fetch:
         fetch_data_cmd()
     if not skip_transform:
@@ -172,7 +177,6 @@ def all_cmd(
     forecast_cmd(run_date)
     report_cmd(run_date)
     publish_cmd(run_date)
-    make_forms_cmd(run_date)
     typer.echo("Pipeline complete.")
 
 

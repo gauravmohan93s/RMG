@@ -5,8 +5,10 @@ Pipeline stages after submission (v2.3): Offer, Deposit, Visa document, Visa app
 Each stage is forecast from the stage before it, the same way submissions are forecast from receipts
 (funnel.py), as a chain:
 
-    Offer <- Submitted <- (published submission forecast)
-    Deposit <- Offer,  Visa_Document <- Deposit,  Visa_Applied <- Visa_Document,  Visa_Granted <- Visa_Applied
+    Offer <- Submitted <- (published submission forecast); every later stage <- the earlier stage (Submitted,
+    Offer, Deposit, ...) that forecasts it best IN THAT COUNTRY in the walk-forward test, among upstreams that
+    convert at most MAX_CONVERSION. The order of milestones differs by country: Australia's Funds stage and
+    the USA's I-20 come before the deposit.
 
     stage[t] = sum_l w_l * upstream[t - l],  l = 0..3
 
@@ -17,7 +19,7 @@ submission forecast, then each stage's own published forecast), so nothing unkno
 For every stage, three variants are replayed at each walk-forward origin and scored on next-quarter totals
 (organisation and countries):
   snaive  same month last year (the baseline);
-  chain   the conversion chain above;
+  chain   the conversion chain above (chain:<upstream> rows show each fixed upstream, as evidence);
   blend   their average.
 The chosen variant is the best one, but chain or blend must beat snaive by at least MIN_GAIN_PCT; otherwise
 snaive is used. Ranges are the 10/90 and 25/75 quantiles of the chosen variant's own walk-forward errors
@@ -43,6 +45,7 @@ LAGS = (0, 1, 2, 3)
 WINDOW = 12
 MIN_GAIN_PCT = 3.0
 MIN_HISTORY = 24          # months of stage history needed before a series is forecast
+MAX_CONVERSION = 1.05     # an upstream converting above this is really downstream in that country
 VARIANTS = ("snaive", "chain", "blend")
 BANDS = ((1, 3), (4, 6), (7, 12))
 ORG = "_ORG"
@@ -127,9 +130,24 @@ def _submitted_sources(nodes: pd.DataFrame, Y: Dict[str, np.ndarray]) -> Dict[st
     return {c: n for c, n in out.items() if n in Y}
 
 
+def _quarter_ape(fc_by_o: Dict[int, Dict[int, float]], st: np.ndarray, T: int):
+    out = {}
+    for o, f in fc_by_o.items():
+        if o + 3 <= T - 1:
+            a = float(st[o + 1:o + 4].sum())
+            v = sum(f.get(h, np.nan) for h in (1, 2, 3))
+            if a > 0 and np.isfinite(v):
+                out[o] = 100 * abs(v - a) / a
+    return out
+
+
 def run(stage_actual: Dict[Tuple[str, str], np.ndarray], Y: Dict[str, np.ndarray], nodes: pd.DataFrame,
         honest: pd.DataFrame, fc: pd.DataFrame, months_ext: pd.DatetimeIndex, T: int, H: int = 12):
-    """Returns (stage_forecast, stage_test, stage_conversion)."""
+    """Returns (stage_forecast, stage_test, stage_conversion).
+
+    Each stage may follow ANY earlier stage (Submitted, Offer, Deposit...): the order of milestones differs by
+    country (Australia's Funds stage and the USA's I-20 come before the deposit), so the upstream is chosen
+    on the walk-forward evidence, not assumed."""
     src = _submitted_sources(nodes, Y)
     origins = sorted(int(o) for o in honest["o"].unique()) if honest is not None and len(honest) else []
     hz = honest[honest["node_id"].isin(set(src.values()))] if len(origins) else honest
@@ -138,68 +156,105 @@ def run(stage_actual: Dict[Tuple[str, str], np.ndarray], Y: Dict[str, np.ndarray
     fsub = fc[(fc["Metric"] == "Submitted") & (fc["Region"] == "_TOTAL") & fc["Level"].isin(["Country", "Organisation"])]
     sub_final = {c: g.set_index("Horizon")["Forecast"].to_dict() for c, g in fsub.groupby("Country")}
 
-    # upstream state per country: actual series, forecast by origin, final forecast
-    up = {c: {"act": Y[n], "by_o": {o: sub_hon.get((n, o), {}) for o in origins}, "final": sub_final.get(c, {})}
-          for c, n in src.items()}
+    # published state per stage and country: actual series, forecast by origin, final forecast
+    states = {"Submitted": {c: {"act": Y[n], "by_o": {o: sub_hon.get((n, o), {}) for o in origins},
+                                "final": sub_final.get(c, {})} for c, n in src.items()}}
     rows_fc, rows_test, rows_conv = [], [], []
-    for stage, upstream in CHAIN:
-        nxt, recs = {}, []
-        for c, u in up.items():
+    for stage, _ in CHAIN:
+        cands: Dict[str, Dict[str, dict]] = {}       # variant -> country -> {"by_o", "final", "up"}
+        acts = {}
+        for c in states["Submitted"]:
             st = stage_actual.get((c, stage))
             if st is None or (st[:T] > 0).sum() < MIN_HISTORY:
                 continue
-            by_o = {}
-            for o in origins:
-                if o < WINDOW + max(LAGS) or not u["by_o"].get(o):
+            acts[c] = st
+            ok = [o for o in origins if o >= WINDOW + max(LAGS)]
+            for up, ups in states.items():
+                u = ups.get(c)
+                if u is None:
                     continue
-                by_o[o] = _forecasts(u["act"], u["by_o"][o], st, o, H)
-                if o + 3 <= T - 1:
-                    a = float(st[o + 1:o + 4].sum())
-                    if a > 0:
-                        for v in VARIANTS:
-                            f = sum(by_o[o][v].get(h, np.nan) for h in (1, 2, 3))
-                            if np.isfinite(f):
-                                recs.append({"Country": c, "o": o, "Variant": v, "APE": 100 * abs(f - a) / a})
-            final = _forecasts(u["act"], u["final"], st, T - 1, H) if u["final"] else None
-            nxt[c] = {"act": st, "by_o_all": by_o, "final_all": final}
-        if not nxt:
-            LOG.info("stages: no usable history for %s - chain stops here", stage)
+                by_o = {o: _forecasts(u["act"], u["by_o"][o], st, o, H) for o in ok if u["by_o"].get(o)}
+                fin = _forecasts(u["act"], u["final"], st, T - 1, H) if u["final"] else None
+                cands.setdefault("snaive", {}).setdefault(c, {"by_o": {o: f["snaive"] for o, f in by_o.items()},
+                                                                "final": fin["snaive"] if fin else {}, "up": None})
+                cands.setdefault(f"chain:{up}", {})[c] = {"by_o": {o: f["chain"] for o, f in by_o.items()},
+                                                           "final": fin["chain"] if fin else {}, "up": up}
+        if not acts:
+            LOG.info("stages: no usable history for %s - stops here", stage)
             break
-        r = pd.DataFrame(recs, columns=["Country", "o", "Variant", "APE"])
-        r["Level"] = np.where(r["Country"] == ORG, "Organisation", "Country")
-        score = r.groupby(["Variant", "Level"])["APE"].median().groupby("Variant").mean() if len(r) else pd.Series(dtype=float)
-        best = str(score.idxmin()) if len(score) else "snaive"
-        if best != "snaive" and "snaive" in score and 100 * (score["snaive"] - score[best]) / score["snaive"] < MIN_GAIN_PCT:
+
+        def score(variant):
+            recs = [{"Country": c, "APE": a} for c, d in cands[variant].items()
+                    for a in _quarter_ape(d["by_o"], acts[c], T).values()]
+            r = pd.DataFrame(recs, columns=["Country", "APE"])
+            if r.empty:
+                return np.nan, r
+            r["Level"] = np.where(r["Country"] == ORG, "Organisation", "Country")
+            return float(r.groupby("Level")["APE"].median().mean()), r
+
+        scores = {v: score(v) for v in cands}
+        # upstream chosen per country: lowest own walk-forward quarter error among the plausible ones
+        # (a "conversion" above MAX_CONVERSION means the upstream actually comes after this stage there)
+        best_up = {}
+        for c in acts:
+            opts = {}
+            for v, d in cands.items():
+                if not v.startswith("chain:") or c not in d:
+                    continue
+                w = _weights(states[d[c]["up"]][c]["act"], acts[c], T - 1)
+                ape = list(_quarter_ape(d[c]["by_o"], acts[c], T).values())
+                if w is not None and 0 < w.sum() <= MAX_CONVERSION and ape:
+                    opts[v] = float(np.median(ape))
+            if opts:
+                best_up[c] = cands[min(opts, key=opts.get)][c]
+        if best_up:
+            mix = lambda a, b: {h: (0.5 * (a[h] + b[h]) if np.isfinite(b.get(h, np.nan)) else a[h]) for h in a}
+            cands["chain"] = best_up
+            cands["blend"] = {c: {"by_o": {o: mix(f, cands["snaive"][c]["by_o"].get(o, {})) for o, f in d["by_o"].items()},
+                                  "final": mix(d["final"], cands["snaive"][c]["final"]) if d["final"] else {},
+                                  "up": d["up"]} for c, d in best_up.items() if c in cands["snaive"]}
+            scores["chain"], scores["blend"] = score("chain"), score("blend")
+        valid = {v: sc for v, (sc, _) in scores.items() if np.isfinite(sc) and not v.startswith("chain:")}
+        best = min(valid, key=valid.get) if valid else "snaive"
+        if best != "snaive" and "snaive" in valid and 100 * (valid["snaive"] - valid[best]) / valid["snaive"] < MIN_GAIN_PCT:
             best = "snaive"
-        for v in VARIANTS:
+        for v, (sc, r) in scores.items():
             for lvl in ("Organisation", "Country"):
-                x = r[(r["Variant"] == v) & (r["Level"] == lvl)]
-                rows_test.append({"StageGroup": stage, "From": upstream, "Variant": v, "Level": lvl,
+                x = r[r["Level"] == lvl] if len(r) else r
+                rows_test.append({"StageGroup": stage, "Variant": v, "Level": lvl,
                                   "Quarter_Error_Pct": float(x["APE"].median()) if len(x) else np.nan,
                                   "N": int(len(x)), "Chosen": v == best})
-        # chosen forecasts become the upstream of the next stage; collect errors for the ranges
-        errs, new_up = [], {}
-        for c, d in nxt.items():
-            st = d["act"]
-            by_o = {o: f[best] for o, f in d["by_o_all"].items()}
-            for o, f in by_o.items():
+        def label(d):
+            if not d.get("up"):
+                return "same month last year"
+            return f"chain from {d['up']}" if best == "chain" else f"blend (last year + chain from {d['up']})"
+
+        # the chosen forecast is published for every country (last year where no plausible upstream exists)
+        chosen, errs, labels = {}, [], {}
+        for c, st in acts.items():
+            d = cands[best].get(c) or cands["snaive"].get(c)
+            if d is None:
+                continue
+            chosen[c] = {"act": st, "by_o": d["by_o"], "final": d["final"]}
+            labels[c] = label(d)
+            for o, f in d["by_o"].items():
                 for h, v in f.items():
                     t = o + h
                     if t <= T - 1 and np.isfinite(v):
                         errs.append((h, np.log1p(max(st[t], 0)) - np.log1p(max(v, 0))))
-            fin = d["final_all"][best] if d["final_all"] else {}
-            new_up[c] = {"act": st, "by_o": by_o, "final": fin}
-            w = _weights(up[c]["act"], st, T - 1)
-            if w is not None and w.sum() > 0:
-                rows_conv.append({"Country": "Organisation" if c == ORG else c, "StageGroup": stage, "From": upstream,
-                                  "Conversion_Pct": round(100 * float(w.sum()), 1),
-                                  **{f"Share_Lag{L}": round(100 * float(wi / w.sum()), 1) for L, wi in zip(LAGS, w)}})
+            up = d.get("up")
+            if up:
+                w = _weights(states[up][c]["act"], st, T - 1)
+                if w is not None and w.sum() > 0:
+                    rows_conv.append({"Country": "Organisation" if c == ORG else c, "StageGroup": stage, "From": up,
+                                      "Conversion_Pct": round(100 * float(w.sum()), 1),
+                                      **{f"Share_Lag{L}": round(100 * float(wi / w.sum()), 1) for L, wi in zip(LAGS, w)}})
         e = pd.DataFrame(errs, columns=["h", "r"])
         q = {}
         for lo, hi in BANDS:
             x = e[e["h"].between(lo, hi)]["r"].to_numpy()
             q[(lo, hi)] = np.quantile(x, [0.1, 0.25, 0.75, 0.9]) if len(x) >= 20 else np.array([np.nan] * 4)
-        for c, d in new_up.items():
+        for c, d in chosen.items():
             st = d["act"]
             for h, f in d["final"].items():
                 if not np.isfinite(f):
@@ -216,8 +271,8 @@ def run(stage_actual: Dict[Tuple[str, str], np.ndarray], Y: Dict[str, np.ndarray
                 rows_fc.append({"Level": "Organisation" if c == ORG else "Country", "Country": c, "StageGroup": stage,
                                 "Date": months_ext[t], "Horizon": h, "Forecast": f, **rng,
                                 "Same_Month_Last_Year": float(st[t - 12]) if 0 <= t - 12 < len(st) else np.nan,
-                                "Method": best})
-        up = new_up
+                                "Method": labels[c]})
+        states[stage] = chosen
     return pd.DataFrame(rows_fc), pd.DataFrame(rows_test), pd.DataFrame(rows_conv)
 
 

@@ -407,9 +407,10 @@ def _page_stages(res, S) -> List:
                            ("BOTTOMPADDING", (0, 0), (-1, -1), 2)] + st))
     return [_header("Pipeline stages after submission — next quarter", res, S), Spacer(0, 6), t, Spacer(0, 5),
             Paragraph("Applications expected to reach each stage for the first time in the next three months (change vs the "
-                      "same months last year). Each stage is forecast from the one before it where that tested better than "
-                      "last year's pattern. * Visa document = CAS (UK), Funds stage / COE (Australia), AIP (New Zealand), "
-                      "I-20 (USA), or the equivalent document elsewhere.", S["tl"]), PageBreak()]
+                      "same months last year). Each stage is forecast from the earlier stage that tested best for that "
+                      "destination, where that beat last year's pattern. * Visa document = CAS (UK), Funds stage / COE "
+                      "(Australia), AIP (New Zealand), I-20 (USA); where a destination has no separate document stage it "
+                      "equals visa applied.", S["tl"]), PageBreak()]
 
 
 def _page_workload(res, S) -> List:
@@ -476,18 +477,18 @@ def _health_table(res) -> Table:
 
 
 def _page_country(res, S, country: str, label: str) -> List:
-    story = _page_dashboard(res, S, "Country", country, label, chart_h=2.45)
+    story = _page_dashboard(res, S, "Country", country, label, chart_h=2.05)
     half = FULL_W / 2 - 0.15
     tot = res.totals[res.totals["Country"] == country]
     n_reg = tot[(tot["Level"] == "Region") & (tot["Metric"] == "Received")]["Region"].nunique()
     cells = []
     if n_reg > 1:
         cells.append(_img(charts.region_bars(tot, "Received", "Regions — received, next 12 months",
-                                             size=(6.4, 2.2)), half))
+                                             size=(6.4, 1.9)), half))
     fva = getattr(res, "forecast_vs_actual", None)
     if fva is not None and len(fva) and ((fva["Level"] == "Country") & (fva["Country"] == country)).any():
         cells.append(_img(charts.track_record(fva, "Country", country, "Received", "Track record — received",
-                                              size=(6.4, 2.2)), half))
+                                              size=(6.4, 1.9)), half))
     if cells:
         cells += [""] * (2 - len(cells))
         story += [Spacer(0, 4), _row(cells, [half + 0.3, half])]

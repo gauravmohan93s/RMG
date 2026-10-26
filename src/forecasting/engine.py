@@ -738,7 +738,12 @@ def load_result(out_dir: Path) -> RunResult:
         df = pd.read_csv(p) if p.exists() and p.stat().st_size > 2 else pd.DataFrame()
         for c in DATE_COLS:
             if c in df.columns:
-                df[c] = pd.to_datetime(df[c])
+                if attr in ("stage_test", "stage_conversion") and c in ("From", "To"):
+                    continue
+                try:
+                    df[c] = pd.to_datetime(df[c])
+                except Exception as exc:  # keep the run going, but never silently: a date column left as text sorts / compares wrongly
+                    print(f"[load_result] WARNING: {rel} column '{c}' is not a date column ({exc}); left as text")
         kw[attr] = df
     man = json.loads((out_dir / "run_manifest.json").read_text(encoding="utf-8"))
     return RunResult(out_dir=out_dir, run_id=man["run_id"], run_date=man["run_date"],
