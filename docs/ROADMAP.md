@@ -64,7 +64,13 @@ metric for every model; nothing fitted on data after a forecast origin.
    last year, as an early signal of a strong or weak intake.
 3. Stage rows in the country input forms, if market leads want to give stage expectations.
 
-## v2.4.0 — External drivers
+## v2.4.0 — Live inputs and outcome stages (2026-10-26)
+- Live country sheets (region × month grid, staffing), read at every run and rolled forward after it.
+- Outcome stages: visa refused, enrolled, deferred.
+- Stage figures on country pages; small-base changes hidden; health-check rows for market views and the
+  bias correction.
+
+## v2.5.0 — External drivers
 - Intake extract and descriptive arrival view shipped in v2.1 (the forecast stays monthly).
 - Test the intake mix of recent months as a leading signal for the global ML models (keep only if it
   improves walk-forward accuracy).
@@ -72,7 +78,7 @@ metric for every model; nothing fitted on data after a forecast origin.
   approval rates); each must prove uplift in the rolling-origin harness before use.
 - Scenario engine: overlays as distributions rather than point multipliers.
 
-## v2.5.0 — Operations (renumbered from the original plan)
+## v2.6.0 — Operations (renumbered from the original plan)
 - Scheduled monthly run after the 25th-cycle close; e-mail/Teams notification with the PDF brief.
 - Drift monitor: alert when realised 80% coverage leaves 70–90% or WAPE degrades.
 - Optional: statsforecast / hierarchicalforecast back-ends for speed at larger scale.

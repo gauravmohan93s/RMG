@@ -313,6 +313,22 @@ def health_check(res) -> pd.DataFrame:
             rows.append({"Check": "Better than 'same month last year'", "Target": "smaller monthly error",
                          "Tested": f"±{w:.0f}% vs ±{bw:.0f}%", "Tested_Status": _status(w < bw),
                          "Live": "–", "Live_Status": "Not yet"})
+
+    dec = getattr(res, "decisions", None)
+    if dec is not None and len(dec) and (dec["Component"] == "statistical_overlay").any():
+        d = dec[dec["Component"] == "statistical_overlay"].iloc[0]
+        rows.append({"Check": "Recent under/over-forecast corrected", "Target": "correction used when it tests better",
+                     "Tested": "on" if str(d["Used"]) != "none" else "off",
+                     "Tested_Status": _status(str(d["Used"]) == str(d["Test_Favours"])),
+                     "Live": "reviewed Jan/Apr/Jul/Oct", "Live_Status": "Not yet"})
+
+    fc = res.forecast
+    dest = fc.loc[fc["Level"] == "Country", "Country"].nunique()
+    if dest and "Human_Expected" in fc:
+        k = fc.loc[fc["Level"].isin(["Country", "Region"]) & fc["Human_Expected"].notna(), "Country"].nunique()
+        rows.append({"Check": "Market view from every destination", "Target": "live input sheet kept up to date",
+                     "Tested": "–", "Tested_Status": "Not yet", "Live": f"{k} of {dest} destinations",
+                     "Live_Status": _status(k == dest, k > 0)})
     return pd.DataFrame(rows)
 
 

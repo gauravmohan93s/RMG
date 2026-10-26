@@ -37,6 +37,7 @@ SETTINGS_FILE: Path = DATA_ROOT / _RAW["paths"]["settings_file"]
 PREDICTIONS_ROOT: Path = DATA_ROOT / "Predictions"
 # executive-facing copies of each month's pack (env override RMG_OUTCOMES_DIR)
 OUTCOMES_ROOT: Path = Path(os.environ.get("RMG_OUTCOMES_DIR") or DATA_ROOT / "Outcomes")
+LIVE_FORMS_DIR: Path = Path(os.environ.get("RMG_LIVE_FORMS_DIR") or DATA_ROOT / "Forms" / "Live")
 
 
 @dataclass(frozen=True)

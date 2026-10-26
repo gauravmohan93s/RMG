@@ -40,7 +40,9 @@ import pandas as pd
 LOG = logging.getLogger("rmg.stages")
 
 CHAIN = [("Offer", "Submitted"), ("Deposit", "Offer"), ("Visa_Document", "Deposit"),
-         ("Visa_Applied", "Visa_Document"), ("Visa_Granted", "Visa_Applied")]
+         ("Visa_Applied", "Visa_Document"), ("Visa_Granted", "Visa_Applied"),
+         ("Visa_Refused", "Visa_Applied"), ("Enrolled", "Visa_Granted"), ("Deferred", "Offer")]   # (stage, usual upstream)
+MIN_YOY_BASE = 150        # change vs last year is not shown when last year's count is below this
 LAGS = (0, 1, 2, 3)
 WINDOW = 12
 MIN_GAIN_PCT = 3.0
@@ -180,8 +182,8 @@ def run(stage_actual: Dict[Tuple[str, str], np.ndarray], Y: Dict[str, np.ndarray
                 cands.setdefault(f"chain:{up}", {})[c] = {"by_o": {o: f["chain"] for o, f in by_o.items()},
                                                            "final": fin["chain"] if fin else {}, "up": up}
         if not acts:
-            LOG.info("stages: no usable history for %s - stops here", stage)
-            break
+            LOG.info("stages: no usable history for %s - skipped", stage)
+            continue
 
         def score(variant):
             recs = [{"Country": c, "APE": a} for c, d in cands[variant].items()
@@ -287,6 +289,6 @@ def stage_totals(sf: pd.DataFrame) -> pd.DataFrame:
             x = g[g["Horizon"] <= k]
             f, ly = float(x["Forecast"].sum()), float(x["Same_Month_Last_Year"].sum())
             out.append({"Level": lvl, "Country": c, "StageGroup": s, "Window": f"Next {k} months", "Forecast": f,
-                        "Same_Months_Last_Year": ly, "YoY_Pct": 100 * (f / ly - 1) if ly > 0 else np.nan,
+                        "Same_Months_Last_Year": ly, "YoY_Pct": 100 * (f / ly - 1) if ly >= MIN_YOY_BASE else np.nan,
                         "Method": g["Method"].iloc[0]})
     return pd.DataFrame(out)

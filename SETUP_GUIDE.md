@@ -195,20 +195,27 @@ A run takes about 25 minutes. The 17-model rolling-origin backtest over 36 origi
    of published forecasts have been compared with actuals. Trust a use once Live passes for 3
    consecutive months.
 
-### Country input forms (staffing rates and market inputs)
-Every `all` run also writes `RMG Calculations/Forms/<YYYY-MM>/To_Send/<Country>.xlsx`, one per destination:
-- **Staffing:** applications per counsellor per month per region, or just the current headcount.
-- **Market_Inputs:** the next 3 months; expected volume where the market lead disagrees with the model,
-  with a reason.
+### Live country input sheets (market view and staffing)
+`RMG Calculations/Forms/Live/<Country>.xlsx`, one per destination, created by the first `publish`.
 
-Send each file to its country lead and save the returned files in `Forms/<YYYY-MM>/Returned/`, then run:
+**Share each file once** (OneDrive: Share → "Can edit", that destination's team only). Ask the teams to
+keep it up to date in place. Nobody sends anything back.
 
-```bash
-python run_pipeline.py collect-forms
-```
+- **Market View:** region × month grid.
+  - **Rows:** for each region, Actual (last 3 months), Model (next 12 months) and Your view (yellow).
+  - **Fill in:** the expected number where the team disagrees with the model, plus a reason, a name and
+    the date in "Last reviewed".
+  - **Colours:** orange or red = more than 15% or 30% away from the model; an orange date = not reviewed
+    for 90 days. Views older than 120 days stop counting.
+- **Staffing:** current FTE per region; applications per FTE are calculated in the sheet.
 
-`Settings.xlsx` is backed up first, then its `Staffing_Productivity` and `Human_Inputs` sheets are updated.
-The next run uses them.
+Every `forecast` reads the sheets into `Settings.xlsx` (`Human_Inputs`, `Staffing_Productivity`; backed up
+daily). Every `publish` refreshes the model rows and rolls the months forward, keeping all entries; the
+previous version goes to `Forms/Live/_history/`. If a file is open in desktop Excel at that moment, it is
+skipped and refreshed the next month. Run the steps by hand with
+`python run_pipeline.py sync-forms` / `refresh-forms`.
+
+Do not rename or move the files: the pipeline finds them by name and a hidden `_key` sheet.
 
 ### Stage data (offers, deposits, visa documents)
 The stage groups in `fetch_data.py` (`STAGE_GROUPS`) are defined from `Region - Team.xlsx`, sheet AppStatus2.

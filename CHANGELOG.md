@@ -3,7 +3,38 @@
 All notable changes are recorded here. Format: [Keep a Changelog](https://keepachangelog.com/);
 versioning: [SemVer](https://semver.org/) as defined in `docs/ROADMAP.md`.
 
-## [2.3.1] — 2026-10-26
+## [2.4.0] — 2026-10-26
+
+### Added
+- **Live country input sheets** (`src/reports/live_forms.py`), shared once and kept up to date by each team:
+  `RMG Calculations/Forms/Live/<Country>.xlsx`.
+  - **Market View:** a region × month grid with three rows per region: Actual (last 3 months), Model
+    (next 12 months) and Your view (yellow input cells). Each row has a reason, name and last-reviewed date.
+  - **Visual checks:** Your view turns orange or red when it is more than 15% or 30% away from the model;
+    the date turns orange after 90 days without review. Model and actual cells are locked.
+  - **Staffing:** one row per region with last-12-month volumes; the team enters current FTE and
+    applications per FTE are calculated in the sheet.
+  - **Read automatically** at the start of every `forecast` into Settings.xlsx (`Human_Inputs`,
+    `Staffing_Productivity`, replaced per destination, Settings backed up daily). No collect step.
+  - **Rolled forward** at every `publish`: new model numbers, new 12-month window, and every entry kept.
+    Past months stay visible next to the actuals. Each refresh copies the old file to `Live/_history`.
+    A file that is open or unreadable is skipped, never overwritten.
+  - Commands: `sync-forms`, `refresh-forms`. The monthly `To_Send` / `Returned` forms are no longer made
+    by `publish` (`make-forms` / `collect-forms` remain).
+- **Outcome stages** from AppStatus2: Visa refused (flag Visa_Rejected), Enrolled (flag Commisionable:
+  enrolment confirmed) and Deferred (flag Deffered). They are forecast like the other stages, each from the
+  earlier stage that tests best per destination. Data arrives with the next fetch.
+- **Country pages** show the next-quarter stage figures.
+- **Health check** rows: "Recent under/over-forecast corrected" (statistical overlay status) and "Market
+  view from every destination" (how many destinations have a live view).
+
+### Changed
+- Change vs last year is not shown for a stage whose same months last year had fewer than 150
+  applications (it showed +300–500% on tiny bases).
+- A destination without history for one stage no longer stops the later stages.
+- Workbook stage columns are in pipeline order.
+
+ — 2026-10-26
 
 ### Fixed
 - **Stage upstream chosen per destination.** Each stage is now forecast from the earlier stage (Submitted,

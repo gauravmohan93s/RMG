@@ -45,3 +45,21 @@ def test_chain_stops_cleanly_without_stage_history():
     stage_actual, Y, nodes, honest, fc, months, T, *_ = _setup()
     sf, test, conv = sg.run({}, Y, nodes, honest, fc, months, T)
     assert sf.empty and test.empty and conv.empty
+
+
+def test_missing_stage_is_skipped_and_later_stages_still_forecast():
+    stage_actual, Y, nodes, honest, fc, months, T, offer, deposit = _setup()
+    enrolled = np.r_[0, 0, 0.4 * offer[:-2]]
+    sf, test, conv = sg.run({("_ORG", "Offer"): offer[:T], ("_ORG", "Enrolled"): enrolled[:T]}, Y, nodes, honest, fc,
+                            months, T)
+    assert set(sf["StageGroup"]) == {"Offer", "Enrolled"}                  # no Deposit / visa data: skipped, not stopped
+    assert conv.set_index("StageGroup").loc["Enrolled", "From"] in ("Offer", "Submitted")
+
+
+def test_change_vs_last_year_hidden_on_small_bases():
+    sf = pd.DataFrame([{"Level": "Country", "Country": c, "StageGroup": "Offer", "Horizon": h, "Forecast": f,
+                        "Same_Month_Last_Year": ly, "Method": "chain from Submitted"}
+                       for c, f, ly in (("Big", 100.0, 80.0), ("Small", 40.0, 5.0)) for h in range(1, 13)])
+    q = sg.stage_totals(sf).set_index(["Country", "Window"])["YoY_Pct"]
+    assert np.isclose(q[("Big", "Next 3 months")], 25.0)                   # 240 last year: shown
+    assert np.isnan(q[("Small", "Next 3 months")]) and np.isnan(q[("Small", "Next 12 months")])   # 15 / 60: hidden

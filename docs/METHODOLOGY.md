@@ -203,9 +203,12 @@ flagged with it, counted per 26th–25th cycle:
 - Deposit;
 - Visa document: CAS (UK), Funds/COE (Australia), AIP (NZ), I-20 (USA), else any visa document;
 - Visa applied;
-- Visa granted.
+- Visa granted;
+- outcomes: Visa refused, Enrolled (enrolment confirmed, commission-earning), Deferred.
 
-**Forecast.** Each stage comes from the one before it, starting from the published submission forecast:
+**Forecast.** Each stage comes from an earlier stage (from the published submission forecast onwards). The
+upstream is chosen per destination by walk-forward quarter error, among upstreams whose fitted conversion
+is at most 105%; a higher "conversion" means that stage really comes after this one there:
 stage[t] = Σ w_l · upstream[t−l], l = 0..3, with non-negative weights fitted on the last 12 months at
 each origin.
 
@@ -214,6 +217,7 @@ next-quarter totals (organisation and countries). The chain or blend must be at 
 last year's pattern.
 
 **Ranges** are the 10/90 and 25/75 quantiles of the chosen variant's own errors by horizon band.
+Change vs last year is shown only where the same months last year had at least 150 applications.
 
 ## 7b. Measured policy events (`src/analysis/signals.py`)
 For each event in `Settings.xlsx!Policy_Events`, impact = actual / counterfactual − 1 over the

@@ -1,4 +1,4 @@
-# RMG Application-Flow Forecasting (v2.3)
+# RMG Application-Flow Forecasting (v2.4)
 
 Monthly 12-month forecast of applications **Received** and **Submitted** for the organisation,
 every destination country and every region. Each forecast comes with ranges that have been tested
@@ -11,7 +11,7 @@ every month.
 | `Outcomes/Latest/` (and `Outcomes/<YYYY-MM> Forecast Pack/`) | Executives: the monthly pack, one PDF per destination, the workbook |
 | `Reports/RMG_Monthly_Pack_<date>.pdf` | Leadership pack: organisation, proof on the last quarter, direction check, destinations, workload, track record and health check, one page per destination |
 | `Reports/RMG_Forecast_<date>.xlsx` | Planners and analysts: every number plus all evidence sheets (method decisions, tests, calibration) |
-| `Forms/<YYYY-MM>/To_Send/<Country>.xlsx` | Country leads: staffing rates and market expectations, collected with `collect-forms` |
+| `Forms/Live/<Country>.xlsx` | Country teams: a live sheet shared once. Region × month grid of actual, model and their view, plus staffing; read at every run and rolled forward after it |
 | `Final_Forecast/final_forecast.csv` | Downstream systems: every region / country / organisation × month with 50/80/95% ranges |
 | `run_manifest.json` | Audit: code version, data fingerprint, settings, method decisions |
 
@@ -39,12 +39,12 @@ Full detail: [docs/METHODOLOGY.md](docs/METHODOLOGY.md); evidence: [docs/experim
 python -m venv .venv_3.12
 .venv_3.12\Scripts\activate
 pip install -r requirements-dev.txt
-python -m pytest                          # 82 tests, synthetic data only
+python -m pytest                          # 86 tests, synthetic data only
 python run_pipeline.py all                # fetch -> transform -> forecast -> report -> publish -> forms (~25 min)
 ```
 
 **Other commands:**
-- `fetch-data`, `transform-data`, `forecast`, `report`, `publish`, `make-forms`, `collect-forms`, `version`
+- `fetch-data`, `transform-data`, `forecast`, `report`, `publish`, `sync-forms`, `refresh-forms`, `version`
 - options: `--run-date YYYY-MM-DD`, `--skip-fetch`, `--skip-transform`
 - stage-data discovery (read-only): `python fetch_data.py --discover-stages`
 
@@ -75,7 +75,7 @@ fetch_data.py, transform_data.py   SQL extract (26th-25th cycles, incl. stage da
 
 ## Versioning
 Semantic versioning; the version (`src/__init__.py`) is stamped into every output. Releases are git
-tags (`v1.0.0` legacy pipeline, `v2.0.0` this engine, `v2.3.1` current). See
+tags (`v1.0.0` legacy pipeline, `v2.0.0` this engine, `v2.4.0` current). See
 [CHANGELOG.md](CHANGELOG.md) and the plan in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Extending

@@ -65,6 +65,10 @@ STAGE_GROUPS = {
     },
     "Visa_Applied": {"*": _VISA_APPLIED},
     "Visa_Granted": {"*": [20, 24, 46, 48, 49, 50, 51, 52, 78]},                           # flag Visa_Recieved
+    # outcomes after the visa decision (v2.4)
+    "Visa_Refused": {"*": [21]},                                                           # flag Visa_Rejected
+    "Enrolled": {"*": [46, 48, 78]},                         # flag Commisionable (enrolment confirmed)
+    "Deferred": {"*": [25, 37, 44, 68]},                                                    # flag Deffered
 }
 STAGE_OUTPUT_PATH = Path(os.environ.get("RMG_STAGE_OUTPUT_PATH", str(DATA_ROOT / "monthly_stage_summary.xlsx")))
 

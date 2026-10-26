@@ -17,7 +17,8 @@ if hasattr(sys.stdout, "reconfigure"):
 import typer
 
 from src import __version__
-from src.config import DATA_ROOT, OUTCOMES_ROOT, PREDICTIONS_ROOT, RAW_FILE, SETTINGS_FILE, load_settings, run_dir
+from src.config import (DATA_ROOT, LIVE_FORMS_DIR, OUTCOMES_ROOT, PREDICTIONS_ROOT, RAW_FILE, SETTINGS_FILE,
+                        load_settings, run_dir)
 
 app = typer.Typer(help=f"RMG application-flow forecasting pipeline v{__version__}: "
                        "fetch -> transform -> forecast -> report", add_completion=False)
@@ -82,6 +83,7 @@ def forecast_cmd(run_date: RunDate = None) -> None:
     out = run_dir(rd)
     _setup_logging(out)
     LOG.info("RMG pipeline v%s — forecast run %s -> %s (data: %s)", __version__, rd, out, RAW_FILE)
+    _sync_live()
     res = run_forecast(load_settings(), out, rd)
     tot = res.totals[(res.totals["Level"] == "Organisation") & (res.totals["Window"] == "Next 12 months")]
     for r in tot.itertuples():
@@ -105,18 +107,46 @@ def report_cmd(run_date: RunDate = None) -> None:
 
 @app.command("publish")
 def publish_cmd(run_date: RunDate = None) -> None:
-    """Copy a run's reports to the executive Outcomes folder and create the country input forms."""
+    """Copy a run's reports to the executive Outcomes folder and roll the live country sheets forward."""
     from src.forecasting.engine import load_result
-    from src.reports.forms import make_forms
+    from src.reports.live_forms import refresh_live
     from src.reports.publish import publish
     rd = _run_date(run_date)
     out = run_dir(rd)
     res = load_result(out)
     for name, p in publish(res, out / "Reports", OUTCOMES_ROOT, __version__).items():
         typer.echo(f"  published ({name}): {p}")
-    folder = DATA_ROOT / "Forms" / pd_month(res)
-    files = make_forms(res, folder)          # forms are part of delivering the month's outputs
-    typer.echo(f"  {len(files)} country input forms in {folder / 'To_Send'}")
+    log = refresh_live(res, LIVE_FORMS_DIR)  # the shared live sheets get the new model numbers and window
+    typer.echo(f"  live country sheets in {LIVE_FORMS_DIR}:")
+    typer.echo(log.to_string(index=False))
+
+
+def _sync_live() -> None:
+    """Read the live country sheets into Settings.xlsx before forecasting (never blocks the run)."""
+    from src.reports.live_forms import sync_live
+    if not LIVE_FORMS_DIR.exists():
+        return
+    try:
+        log = sync_live(LIVE_FORMS_DIR, SETTINGS_FILE)
+        LOG.info("live country sheets read:\n%s", log.to_string(index=False))
+    except Exception as exc:                  # noqa: BLE001 - e.g. Settings.xlsx open in Excel
+        LOG.warning("live country sheets not read (%s: %s); using Settings.xlsx as it is", type(exc).__name__, exc)
+
+
+@app.command("sync-forms")
+def sync_forms_cmd() -> None:
+    """Read the live country sheets into Settings.xlsx now (the forecast step also does this)."""
+    from src.reports.live_forms import sync_live
+    typer.echo(sync_live(LIVE_FORMS_DIR, SETTINGS_FILE).to_string(index=False))
+
+
+@app.command("refresh-forms")
+def refresh_forms_cmd(run_date: RunDate = None) -> None:
+    """Create or roll forward the live country sheets from a run (the publish step also does this)."""
+    from src.forecasting.engine import load_result
+    from src.reports.live_forms import refresh_live
+    out = run_dir(_run_date(run_date)) if run_date else _latest_run()
+    typer.echo(refresh_live(load_result(out), LIVE_FORMS_DIR).to_string(index=False))
 
 
 def _latest_run() -> Path:
@@ -169,7 +199,7 @@ def all_cmd(
     skip_transform: Annotated[bool, typer.Option("--skip-transform", help="Use the existing final summary.")] = False,
     interactive: Annotated[bool, typer.Option("--interactive")] = False,
 ) -> None:
-    """Full monthly run: fetch -> transform -> forecast -> report -> publish (incl. country input forms)."""
+    """Full monthly run: fetch -> transform -> forecast (reads live sheets) -> report -> publish (refreshes them)."""
     if not skip_fetch:
         fetch_data_cmd()
     if not skip_transform:

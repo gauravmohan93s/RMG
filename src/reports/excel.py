@@ -411,15 +411,18 @@ def write_workbook(res, path: Path) -> Path:
                  "the live column passes for 3 consecutive months.")
     st_tot = getattr(res, "stage_totals", None)
     if st_tot is not None and len(st_tot):
+        from ..forecasting.stages import CHAIN
+        order = [s for s, _ in CHAIN if s in set(st_tot["StageGroup"])]            # pipeline order, not alphabetical
         stw = st_tot.pivot_table(index=["Level", "Country", "Window"], columns="StageGroup", values="Forecast",
-                                 aggfunc="sum").reset_index()
+                                 aggfunc="sum")[order].reset_index()
         b.table("Stage Forecast", stw, formats={c: "int" for c in stw.columns[3:]},
                 note="Applications expected to reach each stage after submission (first time in the 26th-25th cycle), "
                      "forecast from the stage before it (conversion chain) or same month last year, whichever tested "
                      "better on next-quarter totals.")
-        yoy = st_tot.pivot_table(index=["Level", "Country", "Window"], columns="StageGroup", values="YoY_Pct").reset_index()
+        yoy = st_tot.pivot_table(index=["Level", "Country", "Window"], columns="StageGroup", values="YoY_Pct",
+                                 dropna=False).reindex(columns=order).reset_index()
         b.table("Stage Forecast", yoy, start_row=len(stw) + 5, formats={c: "pct_plain" for c in yoy.columns[3:]},
-                note="Change vs the same months last year (%).")
+                note="Change vs the same months last year (%); left blank where last year had fewer than 150.")
         conv = getattr(res, "stage_conversion", None)
         if conv is not None and len(conv):
             b.table("Stage Forecast", conv, start_row=len(stw) + len(yoy) + 10,

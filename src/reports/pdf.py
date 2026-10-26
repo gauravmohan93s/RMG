@@ -24,6 +24,7 @@ from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, S
 
 from .. import __version__
 from ..data.prepare import ORG, TOTAL
+from ..forecasting.stages import MIN_YOY_BASE
 from . import charts
 from . import insights as ins
 
@@ -369,9 +370,32 @@ def _page_destinations(res, S) -> List:
                       "confirm the assumption with the market team.", S["tl"]), PageBreak()]
 
 
-STAGE_ORDER = ("Offer", "Deposit", "Visa_Document", "Visa_Applied", "Visa_Granted")
+STAGE_ORDER = ("Offer", "Deposit", "Visa_Document", "Visa_Applied", "Visa_Granted", "Visa_Refused", "Enrolled",
+               "Deferred")
 STAGE_LABEL = {"Offer": "Offers", "Deposit": "Deposits", "Visa_Document": "Visa document*", "Visa_Applied": "Visa applied",
-               "Visa_Granted": "Visa granted"}
+               "Visa_Granted": "Visa granted", "Visa_Refused": "Visa refused", "Enrolled": "Enrolled†",
+               "Deferred": "Deferred"}
+
+
+def _stage_strip(res, country: str):
+    """One-line next-quarter stage summary for a destination page (None without stage data)."""
+    tot = getattr(res, "stage_totals", None)
+    if tot is None or tot.empty:
+        return None
+    q = tot[(tot["Window"] == "Next 3 months") & (tot["Country"] == country)].set_index("StageGroup")
+    stages = [s for s in STAGE_ORDER if s in q.index]
+    if not stages:
+        return None
+    vals = [f"{_n(q.loc[s, 'Forecast'])}  ({_pct(q.loc[s, 'YoY_Pct'])})" if np.isfinite(q.loc[s, "YoY_Pct"])
+            else _n(q.loc[s, "Forecast"]) for s in stages]
+    w0 = 4.2
+    t = Table([["Next quarter — stages"] + [STAGE_LABEL[s] for s in stages], ["vs last year in brackets"] + vals],
+              colWidths=[w0 * cm] + [(FULL_W - w0) / len(stages) * cm] * len(stages))
+    t.setStyle(TableStyle([("FONT", (0, 0), (-1, -1), "Helvetica", 7.2), ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 7.2),
+                           ("BACKGROUND", (0, 0), (-1, 0), HEAD), ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+                           ("TEXTCOLOR", (0, 1), (0, 1), colors.grey), ("LINEBELOW", (0, 0), (-1, -1), 0.25, LINE),
+                           ("TOPPADDING", (0, 0), (-1, -1), 1.6), ("BOTTOMPADDING", (0, 0), (-1, -1), 1.6)]))
+    return t
 
 
 def _page_stages(res, S) -> List:
@@ -395,7 +419,7 @@ def _page_stages(res, S) -> List:
         for s in stages:
             v = getattr(r, s, np.nan) if hasattr(r, s) else rows.loc[rows.index[i - 1], s]
             y = yoy.loc[(lvl, cty), s] if (lvl, cty) in yoy.index and s in yoy.columns else np.nan
-            cells.append(f"{_n(v)}  ({_pct(y)})" if np.isfinite(v) else "–")
+            cells.append("–" if not np.isfinite(v) else f"{_n(v)}  ({_pct(y)})" if np.isfinite(y) else _n(v))
         data.append([name] + cells)
         if lvl == "Organisation":
             st.append(("FONT", (0, i), (-1, i), "Helvetica-Bold", 7.4))
@@ -410,7 +434,8 @@ def _page_stages(res, S) -> List:
                       "same months last year). Each stage is forecast from the earlier stage that tested best for that "
                       "destination, where that beat last year's pattern. * Visa document = CAS (UK), Funds stage / COE "
                       "(Australia), AIP (New Zealand), I-20 (USA); where a destination has no separate document stage it "
-                      "equals visa applied.", S["tl"]), PageBreak()]
+                      "equals visa applied. † Enrolled = enrolment confirmed (commission-earning). Change vs last year is "
+                      f"left out where last year had fewer than {MIN_YOY_BASE}.", S["tl"]), PageBreak()]
 
 
 def _page_workload(res, S) -> List:
@@ -477,21 +502,24 @@ def _health_table(res) -> Table:
 
 
 def _page_country(res, S, country: str, label: str) -> List:
-    story = _page_dashboard(res, S, "Country", country, label, chart_h=2.05)
+    story = _page_dashboard(res, S, "Country", country, label, chart_h=1.8)
     half = FULL_W / 2 - 0.15
     tot = res.totals[res.totals["Country"] == country]
     n_reg = tot[(tot["Level"] == "Region") & (tot["Metric"] == "Received")]["Region"].nunique()
     cells = []
     if n_reg > 1:
         cells.append(_img(charts.region_bars(tot, "Received", "Regions — received, next 12 months",
-                                             size=(6.4, 1.9)), half))
+                                             size=(6.4, 1.65)), half))
     fva = getattr(res, "forecast_vs_actual", None)
     if fva is not None and len(fva) and ((fva["Level"] == "Country") & (fva["Country"] == country)).any():
         cells.append(_img(charts.track_record(fva, "Country", country, "Received", "Track record — received",
-                                              size=(6.4, 1.9)), half))
+                                              size=(6.4, 1.65)), half))
     if cells:
         cells += [""] * (2 - len(cells))
         story += [Spacer(0, 4), _row(cells, [half + 0.3, half])]
+    strip = _stage_strip(res, country)
+    if strip is not None:
+        story += [Spacer(0, 4), strip]
     return story
 
 
