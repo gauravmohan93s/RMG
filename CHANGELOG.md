@@ -3,6 +3,14 @@
 All notable changes are recorded here. Format: [Keep a Changelog](https://keepachangelog.com/);
 versioning: [SemVer](https://semver.org/) as defined in `docs/ROADMAP.md`.
 
+## [2.5.2] — 2026-10-26
+
+### Added
+- **Pipeline chapter: offers and deposits by intake season** (ongoing season, per destination: so far vs last year
+  at the same point) and the offers booking curve. Both appear automatically after the next fetch, which rebuilds
+  the stage history since 2020 by intake (the extract's key now includes Intake / InYear). Until then the page
+  shows the submissions curve.
+
 ## [2.5.1] — 2026-10-26
 
 ### Changed

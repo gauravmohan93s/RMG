@@ -148,8 +148,9 @@ def _intake_chart(res, level: str, country: str, metric: str, k: int = 0, size=(
     c = cur[(cur["Level"] == level) & (cur["Country"] == country) & (cur["Metric"] == metric) & (cur["Intake"] == r["Intake"])]
     if c.empty:
         return None
-    return charts.intake_curve(c, r.to_dict(), f"{r['Intake']} ({r['Phase'].lower()}) — applications {metric.lower()} so far",
-                               metric, size=size)
+    what = (f"applications {metric.lower()}" if metric in ("Received", "Submitted")
+            else STAGE_LABEL.get(metric, metric).rstrip("*†").lower())
+    return charts.intake_curve(c, r.to_dict(), f"{r['Intake']} ({r['Phase'].lower()}) — {what} so far", metric, size=size)
 
 
 def _short(v) -> str:
@@ -321,11 +322,16 @@ def _ch4_pipeline(res, S) -> List:
     out = [_band("4", "Pipeline after submission", "Where this quarter's submissions are expected to go next: offers, "
                  "deposits, visas and enrolment.", res, S), Spacer(0, 5)]
     left = _img(charts.funnel(steps, "Organisation — next quarter, applications reaching each stage", size=(6.4, 3.0)), HALF)
-    ic = _intake_chart(res, "Organisation", ORG, "Submitted", size=(6.4, 3.0))
+    # booking curve of the ongoing season for offers once the stage extract carries intakes, else submissions
+    ic = (_intake_chart(res, "Organisation", ORG, "Offer", size=(6.4, 3.0))
+          or _intake_chart(res, "Organisation", ORG, "Submitted", size=(6.4, 3.0)))
     out.append(_row([left, _img(ic, HALF) if ic else ""], [HALF + 0.3, HALF]))
     t = _stage_table(res)
     if t is not None:
         out += [Spacer(0, 5), t]
+    ss = _season_strip(res, S, "Ongoing", ("Offer", "Deposit"))
+    if ss is not None:
+        out += [Spacer(0, 6), ss]
     out.append(Paragraph(
         "First time each application reaches the stage in the next three months (change vs the same months last year, "
         f"left out below {MIN_YOY_BASE}). Each stage is forecast from the earlier stage that tested best for that "
@@ -334,29 +340,38 @@ def _ch4_pipeline(res, S) -> List:
     return out + [PageBreak()]
 
 
-def _closing_strip(res, S, metric: str = "Received"):
-    """The season now ending (e.g. Fall 2026): received so far for it vs last year's same season, per destination."""
+def _season_strip(res, S, phase: str = "Closing", metrics=("Received",)):
+    """One intake season across destinations: for each metric, so far and vs last year at the same point (coloured).
+    Closing season with receipts (intakes page); ongoing season with offers and deposits (pipeline page)."""
     p = getattr(res, "intake_pace", None)
     if p is None or p.empty or "Phase" not in p:
         return None
-    x = p[(p["Metric"] == metric) & (p["Phase"] == "Closing") & p["Level"].isin(["Organisation", "Country"])]
-    if x.empty:
+    x = p[p["Metric"].isin(metrics) & (p["Phase"] == phase) & p["Level"].isin(["Organisation", "Country"])]
+    metrics = [m for m in metrics if (x["Metric"] == m).any()]
+    if not metrics:
         return None
-    x = x.assign(_o=(x["Level"] != "Organisation").astype(int)).sort_values(["_o", "To_Date"], ascending=[True, False])
-    lab = x["Intake"].iloc[0]
+    first = x[x["Metric"] == metrics[0]]
+    who = first.assign(_o=(first["Level"] != "Organisation").astype(int)).sort_values(["_o", "To_Date"],
+                                                                                      ascending=[True, False])
+    keys = list(zip(who["Level"], who["Country"]))
+    cell = x.set_index(["Metric", "Level", "Country"])
     small = ParagraphStyle("c", fontName="Helvetica-Bold", fontSize=6.6, leading=7.6, alignment=1)
-    names = [Paragraph(_name(r.Level, r.Country), small) for r in x.itertuples()]
-    data = [[f"{lab} (closing)"] + names,
-            ["So far"] + [_n(v, True) for v in x["To_Date"]],
-            ["vs last year, same point"] + [_pct(v) for v in x["Pace_Pct"]]]
-    w0 = 3.6
-    t = Table(data, colWidths=[w0 * cm] + [(FULL_W - w0) / len(names) * cm] * len(names))
-    st = [("FONT", (0, 0), (-1, -1), "Helvetica", 6.9), ("FONT", (0, 0), (0, -1), "Helvetica-Bold", 6.9),
-          ("BACKGROUND", (0, 0), (-1, 0), HEAD), ("ALIGN", (1, 0), (-1, -1), "CENTER"), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-          ("LINEBELOW", (0, 0), (-1, -1), 0.25, LINE), ("TOPPADDING", (0, 0), (-1, -1), 1.6),
-          ("BOTTOMPADDING", (0, 0), (-1, -1), 1.6)]
-    st += [("BACKGROUND", (j, 2), (j, 2), _pace_bg(v)) for j, v in enumerate(x["Pace_Pct"], start=1)]
-    t.setStyle(TableStyle(st))
+    data = [[f"{who['Intake'].iloc[0]} ({phase.lower()})"] + [Paragraph(_name(l, c), small) for l, c in keys]]
+    st = []
+    for m in metrics:
+        lab = {"Received": "So far"}.get(m, f"{STAGE_LABEL.get(m, m).rstrip('*†')} so far")
+        vals = [cell.loc[(m, l, c)] if (m, l, c) in cell.index else None for l, c in keys]
+        data.append([lab] + [_n(v["To_Date"], True) if v is not None else "–" for v in vals])
+        data.append(["  vs last year, same point"] + [_pct(v["Pace_Pct"]) if v is not None else "–" for v in vals])
+        i = len(data) - 1
+        st += [("BACKGROUND", (j, i), (j, i), _pace_bg(v["Pace_Pct"] if v is not None else np.nan))
+               for j, v in enumerate(vals, start=1)]
+    w0 = 3.8
+    t = Table(data, colWidths=[w0 * cm] + [(FULL_W - w0) / len(keys) * cm] * len(keys))
+    t.setStyle(TableStyle([("FONT", (0, 0), (-1, -1), "Helvetica", 6.9), ("FONT", (0, 0), (0, -1), "Helvetica-Bold", 6.9),
+                           ("BACKGROUND", (0, 0), (-1, 0), HEAD), ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+                           ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("LINEBELOW", (0, 0), (-1, -1), 0.25, LINE),
+                           ("TOPPADDING", (0, 0), (-1, -1), 1.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5)] + st))
     return t
 
 
@@ -373,7 +388,7 @@ def _ch4_intakes(res, S) -> List:
     t = _intake_table(res, S)
     if t is not None:
         out.append(t)
-    cl = _closing_strip(res, S)
+    cl = _season_strip(res, S, "Closing", ("Received",))
     if cl is not None:
         out += [Spacer(0, 8), cl]
     out.append(Paragraph(

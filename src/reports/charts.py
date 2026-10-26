@@ -463,7 +463,7 @@ def intake_curve(curves: pd.DataFrame, pace: dict, title: str, metric: str = "Re
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
     ax.axvline(0, color=GRID, lw=1)
     top = float(curves["Cumulative"].max()) if len(curves) else 1.0
-    ax.text(0, top * 1.08, " intake starts", fontsize=6.3, color=INK_2, va="top")
+    ax.text(0, top * 0.02, " intake starts", fontsize=6.3, color=INK_2, va="bottom")
     now = pace.get("Months_To_Start")
     if now is not None and np.isfinite(pace.get("To_Date", np.nan)):
         ax.scatter([now], [pace["To_Date"]], s=28, color=color, zorder=4)
