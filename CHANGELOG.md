@@ -3,7 +3,48 @@
 All notable changes are recorded here. Format: [Keep a Changelog](https://keepachangelog.com/);
 versioning: [SemVer](https://semver.org/) as defined in `docs/ROADMAP.md`.
 
-## [2.4.0] — 2026-10-26
+## [2.5.0] — 2026-10-26
+
+### Added
+- **Monthly pack rebuilt as a story** (`src/reports/pack.py`).
+  - **Organisation, six chapters:** where we are heading; last month and accuracy; where growth comes
+    from; pipeline after submission and the coming intakes; capacity; can we trust it.
+  - **Each destination, the same flow on two pages:** page A is the headline; page B covers regions /
+    teams (table and small charts), the pipeline funnel, the intake curve and the track record.
+  - Each chapter opens with a band carrying the one sentence that matters, and key messages are generated
+    from the numbers. Pages are full and nothing overflows (30 pages for November).
+  - Destination PDFs are the same two pages; the separate legend page is gone (it remains in the footer).
+- **Intake running indicator** (`src/analysis/intake_pace.py`).
+  - **What it shows:** for every running intake (organisation, destination, region; received, submitted
+    and every stage), the count so far vs the same intake a year earlier at the same point, plus a
+    projected final where it tested better than "same as last year".
+  - **Evidence on November data:** at 3 months before the start, destination finals miss by 7% vs 52% for
+    last year's final; at 6 months, 31% vs 50%. It is not published 11–12 months out, where it does not
+    beat last year.
+  - **Outputs:** the "Intake Running" and "Intake Test" workbook sheets.
+- **Stage extract by intake.**
+  - `fetch_data.py` adds Intake / InYear to the stage query. The next fetch rebuilds the stage history
+    once, which also back-fills visa refused, enrolled and deferred.
+  - `transform-data` writes `stage_intake_summary.xlsx`.
+- **Live sheets cover every stage.**
+  - **Market View:** a pipeline block of destination totals for offers, deposits, visa document, visa
+    applied and visa granted.
+  - **Staffing:** a region × stage grid (received, submitted, offers, deposits, visa applied), each with
+    volume per month, FTE and applications per FTE. Destination rates per stage feed the FTE needed for
+    stage forecasts (`seasonality.stage_staffing`); the capacity chapter shows it once teams enter FTE.
+- **E-mails, built every run but OFF** (`src/reports/notify.py`, `[notify] enabled = false`).
+  - **What is built:** a leadership summary (key messages, destination table, pack attached) and
+    reminders to teams whose live sheet has not been reviewed for 45 days.
+  - **Previews:** saved to `Reports/Email_preview/*.eml`.
+  - **Sending needs:** `enabled = true`, recipients, SMTP settings in `.env`, and the Settings sheet
+    `Live_Sheet_Contacts`. Command: `notify`.
+
+### Fixed
+- **Track record for single-region destinations** (Asia, Central & Eastern Europe, East Asia, Europe,
+  Southeast & Central Asia) was blank. It now uses the region's tested history.
+- **The "almost blank" second page** of every destination PDF (the legend) is removed.
+
+ — 2026-10-26
 
 ### Added
 - **Live country input sheets** (`src/reports/live_forms.py`), shared once and kept up to date by each team:

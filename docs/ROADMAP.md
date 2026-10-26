@@ -70,7 +70,19 @@ metric for every model; nothing fitted on data after a forecast origin.
 - Stage figures on country pages; small-base changes hidden; health-check rows for market views and the
   bias correction.
 
-## v2.5.0 — External drivers
+## v2.5.0 — Story pack, intake running indicator, stage staffing (2026-10-26)
+- Monthly pack as a six-chapter story, with the same two-page flow per destination down to regions.
+- Intake running indicator (pace vs last year, tested projection), with the stage extract by intake.
+- Live sheets for every stage (pipeline views, FTE per stage); stage FTE needs.
+- Monthly e-mails built as previews, off until switched on.
+
+**Next:**
+1. After the first fetch with intake-level stages, review the Intake Test sheet for offers, deposits and
+   visas.
+2. Score team views on stages once 6 months have been entered.
+3. Switch e-mails on when ready.
+
+## v2.6.0 — External drivers
 - Intake extract and descriptive arrival view shipped in v2.1 (the forecast stays monthly).
 - Test the intake mix of recent months as a leading signal for the global ML models (keep only if it
   improves walk-forward accuracy).
@@ -78,7 +90,7 @@ metric for every model; nothing fitted on data after a forecast origin.
   approval rates); each must prove uplift in the rolling-origin harness before use.
 - Scenario engine: overlays as distributions rather than point multipliers.
 
-## v2.6.0 — Operations (renumbered from the original plan)
+## v2.7.0 — Operations (renumbered from the original plan)
 - Scheduled monthly run after the 25th-cycle close; e-mail/Teams notification with the PDF brief.
 - Drift monitor: alert when realised 80% coverage leaves 70–90% or WAPE degrades.
 - Optional: statsforecast / hierarchicalforecast back-ends for speed at larger scale.

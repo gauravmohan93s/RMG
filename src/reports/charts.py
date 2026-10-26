@@ -380,6 +380,11 @@ def region_bars(tot: pd.DataFrame, metric: str, title: str, size=(6.4, 3.2), top
 def track_record(fva: pd.DataFrame, level: str, country: str, metric: str, title: str, size=(6.4, 2.6)) -> bytes:
     """Actual vs what we forecast 1 and 3 months before (walk-forward, last 12 months)."""
     f = fva[(fva["Level"] == level) & (fva["Country"] == country) & (fva["Metric"] == metric)].copy()
+    if level == "Country" and f["Target_Month"].nunique() < 6:
+        # single-region destination: it is tested as its one region (the country rows are copies, live only)
+        r = fva[(fva["Level"] == "Region") & (fva["Country"] == country) & (fva["Metric"] == metric)]
+        if r["Region"].nunique() == 1:
+            f = r.copy()
     f["Target_Month"] = pd.to_datetime(f["Target_Month"])
     color = SERIES.get(metric)
     fig, ax = plt.subplots(figsize=size)
@@ -396,4 +401,124 @@ def track_record(fva: pd.DataFrame, level: str, country: str, metric: str, title
     _month_axis(ax)
     ax.legend(fontsize=6, frameon=False, loc="upper left", ncols=3)
     ax.set_title(title, fontsize=9, color=INK, loc="left")
+    return _png(fig)
+
+
+STAGE_COLOR = "#1f3864"
+
+
+def funnel(steps, title: str, size=(6.4, 2.8)) -> bytes:
+    """Pipeline for the next quarter: one bar per stage (forecast), a tick for the same months last year, and
+    how many of every 100 submitted applications reach the stage. steps = [(label, forecast, last_year)],
+    first step = submitted."""
+    from matplotlib.lines import Line2D
+    steps = [s for s in steps if s[1] is not None and np.isfinite(s[1])]
+    fig, ax = plt.subplots(figsize=size)
+    fig.patch.set_facecolor(SURFACE)
+    _style(ax)
+    ax.grid(axis="y", visible=False)
+    ax.grid(axis="x", color=GRID, lw=0.6)
+    if not steps:
+        ax.set_axis_off()
+        ax.text(0.5, 0.5, "No stage data yet", ha="center", va="center", color=INK_2, fontsize=8)
+        return _png(fig)
+    y = np.arange(len(steps))[::-1]
+    f = np.array([s[1] for s in steps], dtype=float)
+    ly = np.array([s[2] if s[2] is not None else np.nan for s in steps], dtype=float)
+    cols = [SERIES["Submitted"]] + [STAGE_COLOR] * (len(steps) - 1)
+    ax.barh(y, f, color=cols, height=0.62, alpha=0.88)
+    ax.scatter(ly, y, marker="|", s=120, color=INK, zorder=3)
+    base = f[0] if f[0] > 0 else np.nan
+    xmax = float(np.nanmax(np.r_[f, ly]))
+    for i, (yi, (lab, fi, li)) in enumerate(zip(y, steps)):
+        chg = f"  ({100 * (fi / li - 1):+.0f}%)" if li and np.isfinite(li) and li >= 150 else ""
+        per = f"   ·  {100 * fi / base:.0f} per 100 submitted" if i and np.isfinite(base) else ""
+        ax.text(max(fi, li if np.isfinite(li) else 0) + 0.02 * xmax, yi, f"{_k(fi)}{chg}{per}", va="center",
+                fontsize=6.6, color=INK)
+    ax.set_yticks(y, [s[0] for s in steps], fontsize=7)
+    ax.set_xlim(0, xmax * 1.75)
+    _kfmt(ax, "x")
+    ax.legend(handles=[Line2D([], [], color=INK, marker="|", ls="", ms=9, label="Same months last year")],
+              fontsize=6, frameon=False, loc="lower right")
+    ax.set_title(title, fontsize=9, color=INK, loc="left")
+    return _png(fig)
+
+
+def intake_curve(curves: pd.DataFrame, pace: dict, title: str, metric: str = "Received", size=(6.4, 2.8)) -> bytes:
+    """Booking curve of one intake: applications for it counted so far, by months before it starts, against the
+    same intake one and two years earlier; the gap at today's point is the pace."""
+    color = SERIES.get(metric, STAGE_COLOR)
+    fig, ax = plt.subplots(figsize=size)
+    fig.patch.set_facecolor(SURFACE)
+    _style(ax)
+    _kfmt(ax)
+    styles = {"Two years ago": dict(color="#b9b8b3", lw=1.0, ls=":"), "Last year": dict(color=INK_2, lw=1.3, ls="--"),
+              "This intake": dict(color=color, lw=2.4, ls="-")}
+    for name, st in styles.items():
+        c = curves[curves["Series"] == name].sort_values("Months_To_Start", ascending=False)
+        if len(c):
+            ax.plot(c["Months_To_Start"], c["Cumulative"], label=name, **st)
+    ax.invert_xaxis()
+    from matplotlib.ticker import MaxNLocator
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.axvline(0, color=GRID, lw=1)
+    top = float(curves["Cumulative"].max()) if len(curves) else 1.0
+    ax.text(0, top * 1.08, " intake starts", fontsize=6.3, color=INK_2, va="top")
+    now = pace.get("Months_To_Start")
+    if now is not None and np.isfinite(pace.get("To_Date", np.nan)):
+        ax.scatter([now], [pace["To_Date"]], s=28, color=color, zorder=4)
+        p = pace.get("Pace_Pct", np.nan)
+        lab = f"today: {_k(pace['To_Date'])}" + (f"  ({p:+.0f}% vs last year)" if np.isfinite(p) else "")
+        ax.annotate(lab, (now, pace["To_Date"]), textcoords="offset points", xytext=(6, 6), fontsize=6.6,
+                    color=color, fontweight="bold")
+    pf = pace.get("Projected_Final", np.nan)
+    if np.isfinite(pf):
+        x_end = -2
+        ax.errorbar([x_end], [pf], yerr=[[pf - pace["Lo80"]], [pace["Hi80"] - pf]], fmt="o", color=color, ms=4,
+                    capsize=3, lw=1)
+        ax.annotate(f"likely final {_k(pf)}", (x_end, pf), textcoords="offset points", xytext=(-4, 8), ha="right",
+                    fontsize=6.4, color=color)
+        top = max(top, float(pace["Hi80"]))
+    ax.set_ylim(0, top * 1.15)
+    ax.set_xlabel("months before the intake starts", fontsize=6.5, color=INK_2)
+    ax.legend(fontsize=6, frameon=False, loc="upper left", ncols=3)
+    ax.set_title(title, fontsize=9, color=INK, loc="left")
+    return _png(fig)
+
+
+def region_multiples(hist: pd.DataFrame, fc: pd.DataFrame, regions, title: str, metric: str = "Received",
+                     ncols: int = 4, size=(13.0, 3.4), months_back: int = 18) -> bytes:
+    """Small multiples: one panel per region, actual (last 18 months) and forecast (next 12) with the plan-for
+    band, the same scale style in every panel and the 12-month change written in the corner."""
+    color = SERIES.get(metric, SERIES["Received"])
+    n = len(regions)
+    nrows = max(1, int(np.ceil(n / ncols)))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(size[0], size[1] * nrows / 2), squeeze=False)
+    fig.patch.set_facecolor(SURFACE)
+    for k, ax in enumerate(axes.flat):
+        if k >= n:
+            ax.set_axis_off()
+            continue
+        reg = regions[k]
+        h = hist[hist["Region"] == reg].sort_values("Date").tail(months_back)
+        f = fc[fc["Region"] == reg].sort_values("Date")
+        _style(ax)
+        _kfmt(ax)
+        ax.tick_params(labelsize=5.5)
+        if len(f):
+            ax.fill_between(f["Date"], f["Lo80"], f["Hi80"], color=color, alpha=0.15, lw=0)
+            ax.plot(f["Date"], f["Forecast"], color=color, lw=1.5)
+        if len(h):
+            ax.plot(h["Date"], h["Actual"], color=INK_2, lw=1.1)
+        ly = hist[(hist["Region"] == reg) & (hist["Date"] >= f["Date"].min() - pd.DateOffset(years=1))
+                  & (hist["Date"] <= f["Date"].max() - pd.DateOffset(years=1))]["Actual"].sum() if len(f) else np.nan
+        chg = 100 * (f["Forecast"].sum() / ly - 1) if len(f) and ly else np.nan
+        ax.set_title(f"{reg}", fontsize=7, color=INK, loc="left", pad=2)
+        if np.isfinite(chg):
+            ax.text(0.98, 0.92, f"{_k(f['Forecast'].sum())}  {chg:+.0f}%", transform=ax.transAxes, ha="right",
+                    va="top", fontsize=6.2, color=color, fontweight="bold")
+        ax.set_ylim(bottom=0)
+        ax.set_xticks([])
+    fig.suptitle(title, fontsize=9, color=INK, x=0.01, ha="left")
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
     return _png(fig)

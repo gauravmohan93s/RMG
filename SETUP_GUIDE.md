@@ -207,7 +207,10 @@ keep it up to date in place. Nobody sends anything back.
     the date in "Last reviewed".
   - **Colours:** orange or red = more than 15% or 30% away from the model; an orange date = not reviewed
     for 90 days. Views older than 120 days stop counting.
-- **Staffing:** current FTE per region; applications per FTE are calculated in the sheet.
+- **Market View, pipeline block:** the same three rows for offers, deposits, visa document, visa applied and
+  visa granted (destination totals).
+- **Staffing:** region × stage grid. For received, submitted, offers, deposits and visa applied the team
+  enters today's FTE (a person's time may be split, e.g. 0.5 + 0.5); applications per FTE are calculated.
 
 Every `forecast` reads the sheets into `Settings.xlsx` (`Human_Inputs`, `Staffing_Productivity`; backed up
 daily). Every `publish` refreshes the model rows and rolls the months forward, keeping all entries; the
@@ -216,6 +219,20 @@ skipped and refreshed the next month. Run the steps by hand with
 `python run_pipeline.py sync-forms` / `refresh-forms`.
 
 Do not rename or move the files: the pipeline finds them by name and a hidden `_key` sheet.
+
+### Monthly e-mails (off until you switch them on)
+Every `publish` builds the e-mails and saves them as previews in `Predictions/<run>/Reports/Email_preview/`
+(open the `.eml` files in Outlook):
+- a leadership summary with the key messages, the destination table and the pack attached;
+- reminders to destination teams whose live sheet has not been reviewed for 45 days.
+
+Nothing is sent until you do all of the following:
+1. In `config/pipeline.toml` `[notify]`, set `enabled = true` and fill `to` (and `cc`).
+2. Add the SMTP settings to `.env`: `RMG_SMTP_HOST`, `RMG_SMTP_PORT`, `RMG_SMTP_USER`, `RMG_SMTP_PASSWORD`,
+   `RMG_MAIL_FROM`.
+3. For reminders, add a `Live_Sheet_Contacts` sheet (Country, Email) to `Settings.xlsx`.
+
+Rebuild or send by hand with `python run_pipeline.py notify`.
 
 ### Stage data (offers, deposits, visa documents)
 The stage groups in `fetch_data.py` (`STAGE_GROUPS`) are defined from `Region - Team.xlsx`, sheet AppStatus2.

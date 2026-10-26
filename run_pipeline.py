@@ -17,8 +17,8 @@ if hasattr(sys.stdout, "reconfigure"):
 import typer
 
 from src import __version__
-from src.config import (DATA_ROOT, LIVE_FORMS_DIR, OUTCOMES_ROOT, PREDICTIONS_ROOT, RAW_FILE, SETTINGS_FILE,
-                        load_settings, run_dir)
+from src.config import (CODE_ROOT, DATA_ROOT, LIVE_FORMS_DIR, NOTIFY, OUTCOMES_ROOT, PREDICTIONS_ROOT, RAW_FILE,
+                        SETTINGS_FILE, STAGE_FILE, load_settings, run_dir)
 
 app = typer.Typer(help=f"RMG application-flow forecasting pipeline v{__version__}: "
                        "fetch -> transform -> forecast -> report", add_completion=False)
@@ -116,9 +116,30 @@ def publish_cmd(run_date: RunDate = None) -> None:
     res = load_result(out)
     for name, p in publish(res, out / "Reports", OUTCOMES_ROOT, __version__).items():
         typer.echo(f"  published ({name}): {p}")
-    log = refresh_live(res, LIVE_FORMS_DIR)  # the shared live sheets get the new model numbers and window
+    log = refresh_live(res, LIVE_FORMS_DIR, STAGE_FILE)  # the shared live sheets get the new model numbers and window
     typer.echo(f"  live country sheets in {LIVE_FORMS_DIR}:")
     typer.echo(log.to_string(index=False))
+    _notify(res, out, rd)
+
+
+def _notify(res, out: Path, rd: str) -> None:
+    """Build the month's e-mails (previews always; sent only when [notify] enabled = true). Never blocks."""
+    from src.reports import notify
+    try:
+        r = notify.run(res, NOTIFY, out / "Reports" / f"RMG_Monthly_Pack_{rd}.pdf", OUTCOMES_ROOT / "Latest",
+                       LIVE_FORMS_DIR, SETTINGS_FILE, CODE_ROOT / ".env")
+        typer.echo(f"  e-mails: {r['built']} built, {r['sent']} sent ({'on' if r['enabled'] else 'off'}); "
+                   f"previews in {r['preview']}")
+    except Exception as exc:                  # noqa: BLE001 - e-mail problems never stop the delivery
+        typer.echo(f"  e-mails not built/sent: {type(exc).__name__}: {exc}")
+
+
+@app.command("notify")
+def notify_cmd(run_date: RunDate = None) -> None:
+    """Build (and, when enabled in config/pipeline.toml [notify], send) the month's e-mails."""
+    from src.forecasting.engine import load_result
+    out = run_dir(_run_date(run_date)) if run_date else _latest_run()
+    _notify(load_result(out), out, out.name)
 
 
 def _sync_live() -> None:
@@ -146,7 +167,7 @@ def refresh_forms_cmd(run_date: RunDate = None) -> None:
     from src.forecasting.engine import load_result
     from src.reports.live_forms import refresh_live
     out = run_dir(_run_date(run_date)) if run_date else _latest_run()
-    typer.echo(refresh_live(load_result(out), LIVE_FORMS_DIR).to_string(index=False))
+    typer.echo(refresh_live(load_result(out), LIVE_FORMS_DIR, STAGE_FILE).to_string(index=False))
 
 
 def _latest_run() -> Path:

@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 
 from .. import __version__
-from ..config import CODE_ROOT, INTAKE_FILE, RAW_FILE, SETTINGS_FILE, STAGE_FILE, Settings
+from ..config import CODE_ROOT, INTAKE_FILE, RAW_FILE, SETTINGS_FILE, STAGE_FILE, STAGE_INTAKE_FILE, Settings
 from ..data.prepare import METRICS, ORG, TOTAL, Panel, build_panel, load_raw, node_id
 from ..governance import manifest as mf
 from ..governance import tracking
@@ -29,6 +29,7 @@ from ..governance import snapshots as snp
 from ..analysis import seasonality as seas
 from ..analysis import signals as sig
 from ..analysis import intake as itk
+from ..analysis import intake_pace as ip
 from . import bias_correction as bc
 from . import calendar_fx as cx
 from . import funnel as fn
@@ -100,6 +101,9 @@ class RunResult:
     intake_lead_profile: pd.DataFrame
     intake_month_mix: pd.DataFrame
     manifest: dict
+    intake_pace: pd.DataFrame = None          # intake running indicator (v2.5); empty for older runs
+    intake_curves: pd.DataFrame = None
+    intake_pace_test: pd.DataFrame = None
 
 
 # where each table lives inside the run folder
@@ -147,6 +151,9 @@ ARTEFACTS = {
     "intake_arrivals": "Analysis/intake_arrivals.csv",
     "intake_lead_profile": "Analysis/intake_lead_profile.csv",
     "intake_month_mix": "Analysis/intake_month_mix.csv",
+    "intake_pace": "Analysis/intake_pace.csv",
+    "intake_curves": "Analysis/intake_curves.csv",
+    "intake_pace_test": "Evaluation/intake_pace_test.csv",
 }
 DATE_COLS = ("Date", "Start", "First_Month", "Last_Active_Month", "Period_Start", "From", "To",
              "Target_Month", "Made_At", "Start_Month", "Intake_Start")
@@ -164,7 +171,8 @@ def label(level: str, country: str, region: str) -> str:
 def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Path = RAW_FILE,
                  settings_file: Path = SETTINGS_FILE, history_path: Optional[Path] = None,
                  raw: Optional[pd.DataFrame] = None, intake_file: Optional[Path] = INTAKE_FILE,
-                 intake_raw: Optional[pd.DataFrame] = None, stage_file: Optional[Path] = STAGE_FILE) -> RunResult:
+                 intake_raw: Optional[pd.DataFrame] = None, stage_file: Optional[Path] = STAGE_FILE,
+                 stage_intake_file: Optional[Path] = STAGE_INTAKE_FILE) -> RunResult:
     timings: Dict[str, float] = {}
     t0 = time.perf_counter()
     # method decisions are locked per quarter (see governance/decisions.py)
@@ -500,12 +508,21 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
                                        seas.PRODUCTIVITY_COLS)
     staffing = seas.staffing_calendar(fc, sidx, scfg.high_threshold, scfg.low_threshold, scfg.apps_per_fte_month,
                                       productivity=prod)
+    st_stage = seas.stage_staffing(stage_fc, prod, scfg.high_threshold, scfg.low_threshold)   # offers, deposits, visa
+    if len(st_stage):
+        staffing = pd.concat([staffing, st_stage], ignore_index=True)
     ev_raw, events_source = sig.load_sheet(settings_file, "Policy_Events",
                                            CODE_ROOT / "config" / "policy_events_template.csv", sig.EVENT_COLS)
     events = sig.measure_events(ev_raw, panel.history)
     intake_df = (itk.clean_intake(intake_raw, settings.data.drop_regions) if intake_raw is not None
                  else itk.load_intake(intake_file, settings.data.drop_regions) if intake_file else pd.DataFrame())
     i_arr, i_lead, i_mix, i_known = itk.intake_views(intake_df, last_actual)
+    try:                                           # intake running indicator: supplementary, never blocks
+        stage_intake = ip.load_stage_intake(stage_intake_file, settings.data.drop_regions)
+        i_pace, i_curves, i_test = ip.intake_pace(ip.intake_long(intake_df, stage_intake), last_actual)
+    except Exception:                              # noqa: BLE001 - log and continue
+        LOG.exception("intake running indicator failed")
+        i_pace = i_curves = i_test = pd.DataFrame()
     lap("summaries")
 
     # 10) governance ────────────────────────────────────────────────────────
@@ -568,7 +585,7 @@ def run_forecast(settings: Settings, out_dir: Path, run_date: str, raw_file: Pat
                     bias_test=bias_test, bias_estimates=bias_est, reconciliation_test=recon_test, point_estimate_test=smear_test, funnel_test=funnel_test, vintage_test=vintage_test, decisions=decisions, calendar_test=calendar_test, stage_forecast=stage_fc, stage_totals=stage_tot, stage_test=stage_test, stage_conversion=stage_conv, data_revisions=data_rev, seasonal_index=sidx, seasonal_by_year=syear,
                     staffing=staffing, forecast_vs_actual=fva, fva_summary=fva_sum, human_scores=human_scores,
                     events=events, intake_arrivals=i_arr, intake_lead_profile=i_lead, intake_month_mix=i_mix,
-                    manifest=manifest)
+                    manifest=manifest, intake_pace=i_pace, intake_curves=i_curves, intake_pace_test=i_test)
     save_result(res, bt.preds, honest)
     lap("save")
     return res
@@ -724,7 +741,8 @@ def save_result(res: RunResult, preds: pd.DataFrame, honest: pd.DataFrame) -> No
     for attr, rel in ARTEFACTS.items():
         p = res.out_dir / rel
         p.parent.mkdir(parents=True, exist_ok=True)
-        getattr(res, attr).to_csv(p, index=False)
+        df = getattr(res, attr)
+        (df if df is not None else pd.DataFrame()).to_csv(p, index=False)
     preds.to_parquet(res.out_dir / "Evaluation" / "backtest_predictions.parquet", index=False)
     if not honest.empty:
         honest.to_parquet(res.out_dir / "Evaluation" / "walk_forward_evaluation.parquet", index=False)

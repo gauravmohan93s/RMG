@@ -17,6 +17,8 @@ INTAKE_PATH       = BASE_DIR / "monthly_intake_summary.xlsx"
 INTAKE_FINAL_PATH = BASE_DIR / "intake_final_summary.xlsx"
 STAGE_PATH        = BASE_DIR / "monthly_stage_summary.xlsx"
 STAGE_FINAL_PATH  = BASE_DIR / "stage_final_summary.xlsx"
+STAGE_INTAKE_PATH = BASE_DIR / "stage_intake_summary.xlsx"
+STAGE_INTAKE_PATH = BASE_DIR / "stage_intake_summary.xlsx"
 # ─────────────────────────────────────────────────────────────────────────────
 
 def generate_final_summary() -> Tuple[List[int], List[int]]:

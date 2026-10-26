@@ -7,9 +7,13 @@ Live country input sheets: shared once, kept up to date by each destination team
                     Actual     the last 3 months
                     Model      the forecast for the next 12 months
                     Your view  yellow cells: the team's expected volume where it differs from the model
-                  then Reason / driver, Name, Last reviewed. Orange / red = more than 15% / 30% away from the
-                  model; an orange date = not reviewed for 90 days.
-    Staffing      one row per region: last-12-month volumes, Current FTE (yellow), applications per FTE.
+                  then Reason / driver, Name, Last reviewed. Blocks: applications received, applications
+                  submitted, and the pipeline after submission (offers, deposits, visa... destination total).
+                  Orange / red = more than 15% / 30% away from the model; an orange date = not reviewed for
+                  90 days.
+    Staffing      region x stage grid: for Received, Submitted, Offers, Deposits and Visa applied, the
+                  last-12-month volume per month, the team's FTE on that stage (yellow; a person's time can be
+                  split, e.g. 0.5 + 0.5) and applications per FTE (calculated).
     Read me
 
   sync_live(folder, settings_file)   before each forecast: reads every sheet into Settings.xlsx
@@ -27,7 +31,7 @@ import os
 import shutil
 from datetime import date
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -42,8 +46,11 @@ PAST = 3                           # actual months shown before the forecast win
 DIFF_WATCH, DIFF_FLAG = 0.15, 0.30
 STALE_DAYS = 90
 NOTE_COLS = ["Reason / driver", "Name", "Last reviewed"]
-STAFF_HEAD = ["Region", "Received per month (last 12m)", "Submitted per month (last 12m)", "Current FTE",
-              "Received per FTE", "Submitted per FTE", "Notes", "Name", "Last reviewed"]
+STAFF_STAGES = [("Received", "Received"), ("Submitted", "Submitted"), ("Offer", "Offers"), ("Deposit", "Deposits"),
+                ("Visa_Applied", "Visa applied")]
+PIPELINE = ["Offer", "Deposit", "Visa_Document", "Visa_Applied", "Visa_Granted", "Visa_Refused", "Enrolled", "Deferred"]
+STAGE_TITLE = {"Offer": "Offers", "Deposit": "Deposits", "Visa_Document": "Visa document", "Visa_Applied": "Visa applied",
+               "Visa_Granted": "Visa granted", "Visa_Refused": "Visa refused", "Enrolled": "Enrolled", "Deferred": "Deferred"}
 SETTINGS_STAFF = ["Country", "Region", "Metric", "Apps_Per_FTE_Month", "Owner", "Notes"]
 SETTINGS_HUMAN = ["Country", "Region", "Metric", "Month", "Expected_Volume", "Submitted_By", "Reason", "Submitted_On"]
 METRIC_TITLE = {"Received": "Applications received", "Submitted": "Applications submitted"}
@@ -53,11 +60,13 @@ README = [
     "reads it at every monthly run. There is no need to send it back.",
     "Market View: for each region, 'Model' is the forecast. Type your expected number in the yellow 'Your view' cell "
     "only where you expect something different, with the reason, your name and the date in 'Last reviewed'. "
-    "Leave it blank where you agree with the model.",
+    "Leave it blank where you agree with the model. The last block covers the stages after submission (offers, "
+    "deposits, visas) for the destination as a whole.",
     "Colours: orange = your view is more than 15% away from the model, red = more than 30% (please make sure the "
     "reason explains it). An orange date = not reviewed for 90 days; views older than 120 days stop counting.",
-    "Staffing: enter today's headcount (FTE) working on each region; applications per FTE are calculated from the "
-    "last 12 months. They turn the forecast into staffing needs.",
+    "Staffing: for each region and stage, enter how many full-time people (FTE) work on it today. Split a person's "
+    "time if they cover several stages (e.g. 0.5 offers + 0.5 deposits). Applications per FTE are calculated from "
+    "the last 12 months and turn the forecast into staffing needs.",
     "Every month the model rows are refreshed and the months roll forward; your entries are kept. Past months stay "
     "visible (locked) next to what actually happened, so you can see how close your view was.",
     "Every view is scored against what happens. After 6 scored months, views from people who beat the model are "
@@ -93,8 +102,28 @@ def _text(v) -> str:
     return "" if v is None or pd.isna(v) or str(v).strip().lower() == "nan" else str(v).strip()
 
 
+def _num(v) -> float:
+    x = pd.to_numeric(v, errors="coerce")
+    return float(x) if np.isfinite(x) else np.nan
+
+
+def _staff_cols(label: str) -> Tuple[str, str, str]:
+    return f"{label} / month", f"{label} FTE", f"{label} per FTE"
+
+
+def load_stage_actuals(stage_file: Optional[Path]) -> pd.DataFrame:
+    """stage_final_summary.xlsx -> Country, Region, StageGroup, Date, Apps (empty when absent)."""
+    if stage_file is None or not Path(stage_file).exists():
+        return pd.DataFrame(columns=["Country", "Region", "StageGroup", "Date", "Apps"])
+    d = pd.read_excel(stage_file, dtype={"Month": str})
+    d = d.rename(columns={"Country Grouped": "Country", "Name of Region": "Region"})
+    d["Date"] = pd.to_datetime(d["Month"].str[:7] + "-01", errors="coerce")
+    d["Apps"] = pd.to_numeric(d["Apps"], errors="coerce").fillna(0.0)
+    return d.dropna(subset=["Date"])[["Country", "Region", "StageGroup", "Date", "Apps"]]
+
+
 # ─────────────────────────────── data for one destination ───────────────────────────────
-def _country_data(res, country: str):
+def _country_data(res, country: str, stages: pd.DataFrame):
     h = res.history.copy()
     h["Date"] = pd.to_datetime(h["Date"])
     f = res.forecast.copy()
@@ -107,25 +136,40 @@ def _country_data(res, country: str):
     recent = hc[hc["Date"] > last - pd.DateOffset(months=12)]
     regions = (recent[recent["Metric"] == METRICS[0]].groupby("Region")["Actual"].sum()       # largest first
                .reindex(hc["Region"].unique(), fill_value=0).sort_values(ascending=False).index.tolist())
-    series = []                          # (region label, metric, actual by month, model by month)
+    blocks = []                          # (title, [(region label, metric, actual by month, model by month)])
     for m in METRICS:
-        act = hc[hc["Metric"] == m].groupby("Date")["Actual"].sum()
-        mod = fr[(fr["Level"] == "Country") & (fr["Region"] == TOTAL) & (fr["Metric"] == m)].groupby("Date")["Forecast"].sum()
-        series.append((TOTAL_LABEL, m, act, mod))
+        rows = [(TOTAL_LABEL, m, hc[hc["Metric"] == m].groupby("Date")["Actual"].sum(),
+                 fr[(fr["Level"] == "Country") & (fr["Region"] == TOTAL) & (fr["Metric"] == m)].groupby("Date")["Forecast"].sum())]
         if len(regions) > 1:
             for r in regions:
-                a = hc[(hc["Metric"] == m) & (hc["Region"] == r)].groupby("Date")["Actual"].sum()
-                mo = fr[(fr["Level"] == "Region") & (fr["Region"] == r) & (fr["Metric"] == m)].groupby("Date")["Forecast"].sum()
-                series.append((r, m, a, mo))
-    avg = recent.groupby(["Region", "Metric"])["Actual"].sum().div(12)
-    staff = [(r, float(avg.get((r, "Received"), 0.0)), float(avg.get((r, "Submitted"), 0.0))) for r in regions]
-    return past, fut, series, staff
+                rows.append((r, m, hc[(hc["Metric"] == m) & (hc["Region"] == r)].groupby("Date")["Actual"].sum(),
+                             fr[(fr["Level"] == "Region") & (fr["Region"] == r) & (fr["Metric"] == m)]
+                             .groupby("Date")["Forecast"].sum()))
+        blocks.append((METRIC_TITLE[m], rows))
+    sc = stages[stages["Country"] == country]
+    sf = getattr(res, "stage_forecast", None)
+    sf = sf[(sf["Country"] == country) & (sf["Level"] == "Country")] if sf is not None and len(sf) else pd.DataFrame()
+    pipe = []
+    for s in PIPELINE:
+        mod = (sf[sf["StageGroup"] == s].assign(Date=lambda x: pd.to_datetime(x["Date"])).groupby("Date")["Forecast"].sum()
+               if len(sf) else pd.Series(dtype=float))
+        act = sc[sc["StageGroup"] == s].groupby("Date")["Apps"].sum()
+        if len(mod) or act.sum() > 0:
+            pipe.append((TOTAL_LABEL, s, act, mod))
+    if pipe:
+        blocks.append(("Pipeline after submission — destination total", pipe))
+    avg = recent.groupby(["Region", "Metric"])["Actual"].sum().div(12).to_dict()
+    srec = sc[sc["Date"] > last - pd.DateOffset(months=12)]
+    avg.update(srec.groupby(["Region", "StageGroup"])["Apps"].sum().div(12).to_dict())
+    staff_stages = [(k, lab) for k, lab in STAFF_STAGES if k in METRICS or (srec["StageGroup"] == k).any()]
+    staff = [(r, {k: float(avg.get((r, k), 0.0)) for k, _ in staff_stages}) for r in regions]
+    return past, fut, blocks, staff_stages, staff
 
 
 # ─────────────────────────────── reading a live file ───────────────────────────────
 def _read_raw(path: Path) -> dict:
-    """Everything the team entered: views by (region, metric, 'YYYY-MM'), notes by (region, metric), staffing
-    by region (FTE, notes, name, date, avg received, avg submitted). Raises if the file cannot be read."""
+    """Everything the team entered: views by (region, metric, 'YYYY-MM'), notes by (region, metric), staffing by
+    region ({"fte": {stage: FTE}, "avg": {stage: per month}, "notes", "name", "date"}). Raises if unreadable."""
     with pd.ExcelFile(path) as x:
         key = pd.read_excel(x, "_key", header=None) if "_key" in x.sheet_names else pd.DataFrame()
         mv = pd.read_excel(x, "Market View", header=HEADER_ROW)
@@ -137,25 +181,36 @@ def _read_raw(path: Path) -> dict:
     for vals in mv.itertuples(index=False, name=None):
         row = dict(zip(mv.columns, vals))
         reg, met = _text(row["Region"]), _text(row["Metric"])
+        if met not in METRICS:                    # pipeline rows show the stage name; they are destination totals
+            reg = TOTAL_LABEL
         for c, k in months.items():
-            v = pd.to_numeric(row[c], errors="coerce") if k else np.nan
+            v = _num(row[c]) if k else np.nan
             if k and np.isfinite(v):
-                out["views"][(reg, met, k)] = float(v)
+                out["views"][(reg, met, k)] = v
         note = tuple(row.get(c) for c in NOTE_COLS)
         if _text(note[0]) or _text(note[1]) or _as_date(note[2]):
             out["notes"][(reg, met)] = note
     for vals in st.itertuples(index=False, name=None):
         row = dict(zip(st.columns, vals))
         reg = _text(row.get("Region"))
-        if reg and reg.lower() != "total":
-            out["staff"][reg] = (row.get("Current FTE"), row.get("Notes"), row.get("Name"), row.get("Last reviewed"),
-                                 row.get(STAFF_HEAD[1]), row.get(STAFF_HEAD[2]))
+        if not reg or reg.lower() == "total":
+            continue
+        fte, avg = {}, {}
+        for k, lab in STAFF_STAGES:
+            c_avg, c_fte, _ = _staff_cols(lab)
+            if c_fte in row:
+                fte[k], avg[k] = _num(row[c_fte]), _num(row.get(c_avg))
+        if "Current FTE" in row:                                 # layout 1 (one FTE for receiving + submitting)
+            fte["Received"] = _num(row["Current FTE"])
+            avg["Received"] = _num(row.get("Received per month (last 12m)"))
+        out["staff"][reg] = {"fte": fte, "avg": avg, "notes": row.get("Notes"), "name": row.get("Name"),
+                             "date": row.get("Last reviewed")}
     return out
 
 
 # ─────────────────────────────── writing a live file ───────────────────────────────
-def _write(path: Path, country: str, label: str, past, fut, series, staff, carry: dict, refreshed: date,
-           actual_to: pd.Timestamp) -> None:
+def _write(path: Path, country: str, label: str, past, fut, blocks, staff_stages, staff, carry: dict,
+           refreshed: date, actual_to: pd.Timestamp) -> None:
     wb = xlsxwriter.Workbook(str(path))
     F = lambda **k: wb.add_format({"font_name": "Calibri", "font_size": 10, "valign": "vcenter", **k})
     edge = {"border": 1, "border_color": "#e3e6ea"}
@@ -202,12 +257,13 @@ def _write(path: Path, country: str, label: str, past, fut, series, staff, carry
     for j, h in enumerate(NOTE_COLS):
         ws.write(HEADER_ROW, cn + j, h, head_l)
     r = HEADER_ROW + 1
-    for m in METRICS:
-        ws.merge_range(r, 0, r, cn + len(NOTE_COLS) - 1, METRIC_TITLE[m], band)
+    for block_title, rows in blocks:
+        ws.merge_range(r, 0, r, cn + len(NOTE_COLS) - 1, block_title, band)
         r += 1
-        for reg, met, act, mod in (s for s in series if s[1] == m):
+        for reg, met, act, mod in rows:
+            shown = STAGE_TITLE.get(met, met)
             for i, row in enumerate(("Actual", "Model", "Your view")):
-                ws.write(r + i, 0, reg, lab if i == 0 else lab_soft)
+                ws.write(r + i, 0, reg if met in METRICS else shown, lab if i == 0 else lab_soft)
                 ws.write(r + i, 1, met, lab_soft)
                 ws.write(r + i, 2, row, kind[row])
             for j, d in enumerate(months):
@@ -261,43 +317,54 @@ def _write(path: Path, country: str, label: str, past, fut, series, staff, carry
     ws.protect("", {"format_columns": True, "format_rows": True})
     ws.activate()
 
-    # ── Staffing
+    # ── Staffing: region x stage
     ss = wb.add_worksheet("Staffing")
     ss.write(0, 0, f"Staffing — {label}", title)
-    ss.write(1, 0, "Enter today's headcount (FTE) working on each region; applications per FTE are calculated.", sub)
-    for j, h in enumerate(STAFF_HEAD):
-        ss.write(HEADER_ROW, j, h, head_l if j in (0, 6, 7, 8) else head)
+    ss.write(1, 0, "For each region and stage: how many full-time people (FTE) work on it today. Split a person's "
+                   "time across stages if needed (e.g. 0.5 + 0.5). Applications per FTE are calculated.", sub)
+    ss.write(HEADER_ROW, 0, "Region", head_l)
     num = F(num_format="#,##0", bg_color="#eef1f5", **edge)
     rate = F(num_format="#,##0.0", font_color="#1f3864", **edge)
     fte = F(num_format="0.0", **yellow)
-    r0 = HEADER_ROW + 1
-    for i, (reg, rec, sub_) in enumerate(staff):
+    r0, cols = HEADER_ROW + 1, {}
+    for j, (k, lab_) in enumerate(staff_stages):
+        c = 1 + 3 * j
+        cols[k] = c
+        ss.merge_range(HEADER_ROW - 1, c, HEADER_ROW - 1, c + 2, lab_, head)
+        for i, h in enumerate(_staff_cols(lab_)):
+            ss.write(HEADER_ROW, c + i, h, head)
+    cn2 = 1 + 3 * len(staff_stages)
+    for j, h in enumerate(("Notes", "Name", "Last reviewed")):
+        ss.write(HEADER_ROW, cn2 + j, h, head_l)
+    for i, (reg, avgs) in enumerate(staff):
         r = r0 + i
-        c = carry["staff"].get(reg, (None,) * 6)
+        cr = carry["staff"].get(reg, {"fte": {}, "notes": None, "name": None, "date": None})
         ss.write(r, 0, reg, F(bold=True, **edge))
-        ss.write_number(r, 1, round(rec), num)
-        ss.write_number(r, 2, round(sub_), num)
-        v = pd.to_numeric(c[0], errors="coerce")
-        ss.write_number(r, 3, float(v), fte) if np.isfinite(v) else ss.write_blank(r, 3, None, fte)
-        D = xl_rowcol_to_cell(r, 3)
-        for j, src, base in ((4, 1, rec), (5, 2, sub_)):
-            cached = round(base / v, 1) if np.isfinite(v) and v > 0 else ""
-            ss.write_formula(r, j, f'=IF(AND(ISNUMBER({D}),{D}>0),{xl_rowcol_to_cell(r, src)}/{D},"")', rate, cached)
-        for j, txt in ((6, _text(c[1])), (7, _text(c[2]))):
-            ss.write_string(r, j, txt, inp_txt) if txt else ss.write_blank(r, j, None, inp_txt)
-        d = _as_date(c[3])
-        ss.write_datetime(r, 8, d, inp_date) if d else ss.write_blank(r, 8, None, inp_date)
-        ss.data_validation(r, 3, r, 3, {"validate": "decimal", "criteria": ">=", "value": 0,
-                                        "error_message": "Enter the headcount (0 or more)."})
+        for k, c in cols.items():
+            a, v = avgs.get(k, 0.0), cr["fte"].get(k, np.nan)
+            ss.write_number(r, c, round(a), num)
+            ss.write_number(r, c + 1, float(v), fte) if np.isfinite(v) else ss.write_blank(r, c + 1, None, fte)
+            D, A = xl_rowcol_to_cell(r, c + 1), xl_rowcol_to_cell(r, c)
+            cached = round(a / v, 1) if np.isfinite(v) and v > 0 else ""
+            ss.write_formula(r, c + 2, f'=IF(AND(ISNUMBER({D}),{D}>0),{A}/{D},"")', rate, cached)
+            ss.data_validation(r, c + 1, r, c + 1, {"validate": "decimal", "criteria": ">=", "value": 0,
+                                                    "error_message": "Enter the FTE (0 or more)."})
+        for j, txt in ((0, _text(cr["notes"])), (1, _text(cr["name"]))):
+            ss.write_string(r, cn2 + j, txt, inp_txt) if txt else ss.write_blank(r, cn2 + j, None, inp_txt)
+        d = _as_date(cr["date"])
+        ss.write_datetime(r, cn2 + 2, d, inp_date) if d else ss.write_blank(r, cn2 + 2, None, inp_date)
     rt = r0 + len(staff)
     ss.write(rt, 0, "Total", F(bold=True, top=1))
-    for j in (1, 2, 3):
-        a, b = xl_rowcol_to_cell(r0, j), xl_rowcol_to_cell(rt - 1, j)
-        ss.write_formula(rt, j, f"=SUM({a}:{b})", F(bold=True, num_format="#,##0.0" if j == 3 else "#,##0", top=1))
+    for k, c in cols.items():
+        for i in (0, 1):
+            a, b = xl_rowcol_to_cell(r0, c + i), xl_rowcol_to_cell(rt - 1, c + i)
+            ss.write_formula(rt, c + i, f"=SUM({a}:{b})", F(bold=True, num_format="#,##0.0" if i else "#,##0", top=1))
+        D, A = xl_rowcol_to_cell(rt, c + 1), xl_rowcol_to_cell(rt, c)
+        ss.write_formula(rt, c + 2, f'=IF(AND(ISNUMBER({D}),{D}>0),{A}/{D},"")', F(bold=True, num_format="#,##0.0", top=1))
     ss.set_column(0, 0, 28)
-    ss.set_column(1, 5, 14)
-    ss.set_column(6, 6, 40)
-    ss.set_column(7, 8, 15)
+    ss.set_column(1, cn2 - 1, 11)
+    ss.set_column(cn2, cn2, 36)
+    ss.set_column(cn2 + 1, cn2 + 2, 15)
     ss.set_row(HEADER_ROW, 30)
     ss.freeze_panes(HEADER_ROW + 1, 1)
     ss.protect("", {"format_columns": True, "format_rows": True})
@@ -309,11 +376,11 @@ def _write(path: Path, country: str, label: str, past, fut, series, staff, carry
     for i, t in enumerate(README, start=2):
         rm.write(i, 0, f"{i - 1}.", F(bold=True, valign="top"))
         rm.write(i, 1, t, wrap)
-        rm.set_row(i, 44)
+        rm.set_row(i, 48)
     rm.set_column(0, 0, 4)
     rm.set_column(1, 1, 120)
     k = wb.add_worksheet("_key")
-    for i, (a, b) in enumerate((("country", country), ("label", label), ("layout", "1"))):
+    for i, (a, b) in enumerate((("country", country), ("label", label), ("layout", "2"))):
         k.write_string(i, 0, a)
         k.write_string(i, 1, b)
     k.hide()
@@ -321,10 +388,11 @@ def _write(path: Path, country: str, label: str, past, fut, series, staff, carry
 
 
 # ─────────────────────────────── public ───────────────────────────────
-def refresh_live(res, folder: Path) -> pd.DataFrame:
+def refresh_live(res, folder: Path, stage_file: Optional[Path] = None) -> pd.DataFrame:
     """Create or roll forward every destination's live sheet, keeping the team's entries."""
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
+    stages = load_stage_actuals(stage_file)
     t = res.totals
     countries = t[(t["Level"] == "Country") & (t["Metric"] == "Received")][["Country", "Label"]].drop_duplicates()
     log = []
@@ -339,23 +407,26 @@ def refresh_live(res, folder: Path) -> pd.DataFrame:
                 continue
             (folder / "_history").mkdir(exist_ok=True)
             shutil.copy2(p, folder / "_history" / f"{p.stem}_{date.today():%Y%m%d}.xlsx")
-        past, fut, series, staff = _country_data(res, country)
+        past, fut, blocks, staff_stages, staff = _country_data(res, country, stages)
         tmp = p.with_name(p.stem + ".tmp.xlsx")
-        _write(tmp, country, label, past, fut, series, staff, carry, date.today(), pd.Timestamp(res.last_actual))
+        _write(tmp, country, label, past, fut, blocks, staff_stages, staff, carry, date.today(),
+               pd.Timestamp(res.last_actual))
         try:
             os.replace(tmp, p)
         except PermissionError:
             tmp.unlink(missing_ok=True)
             log.append({"Destination": label, "Status": "skipped", "Note": "file open / locked: refreshed next run"})
             continue
-        n_fte = sum(1 for v in carry["staff"].values() if np.isfinite(pd.to_numeric(v[0], errors="coerce")))
+        n_fte = sum(1 for v in carry["staff"].values() for x in v["fte"].values() if np.isfinite(x))
         log.append({"Destination": label, "Status": "refreshed" if existed else "created",
                     "Note": f"{len(carry['views'])} views and {n_fte} FTE entries kept" if existed else ""})
     return pd.DataFrame(log, columns=["Destination", "Status", "Note"])
 
 
 def read_live(folder: Path) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """(Human_Inputs rows, Staffing_Productivity rows, log) from every live sheet in folder."""
+    """(Human_Inputs rows, Staffing_Productivity rows, log) from every live sheet in folder. Staffing: one rate
+    per region x stage, plus a destination rate (Region '*') per stage after submission, where the stage
+    forecast is made for the destination as a whole."""
     human, staff, log = [], [], []
     for p in sorted(Path(folder).glob("*.xlsx")):
         if p.name.startswith("~$") or p.name.endswith(".tmp.xlsx"):
@@ -378,18 +449,22 @@ def read_live(folder: Path) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
                           "Expected_Volume": v, "Submitted_By": _text(name) or team, "Reason": _text(reason),
                           "Submitted_On": (d.date() if d else date.today()).isoformat()})
             n_views += 1
-        n_fte = 0
-        for reg, (fte, notes, name, _, rec, sub_) in raw["staff"].items():
-            fte = pd.to_numeric(fte, errors="coerce")
-            if not (np.isfinite(fte) and fte > 0):
-                continue
-            n_fte += 1
-            for met, a in (("Received", rec), ("Submitted", sub_)):
-                a = pd.to_numeric(a, errors="coerce")
-                if np.isfinite(a) and a > 0:
-                    staff.append({"Country": country, "Region": reg, "Metric": met,
-                                  "Apps_Per_FTE_Month": round(float(a / fte), 1), "Owner": _text(name),
-                                  "Notes": f"live sheet: FTE {fte:g}. {_text(notes)}".strip()})
+        n_fte, pooled = 0, {}
+        for reg, e in raw["staff"].items():
+            for k, fte in e["fte"].items():
+                a = e["avg"].get(k, np.nan)
+                if not (np.isfinite(fte) and fte > 0 and np.isfinite(a) and a > 0):
+                    continue
+                n_fte += 1
+                staff.append({"Country": country, "Region": reg, "Metric": k, "Apps_Per_FTE_Month": round(a / fte, 1),
+                              "Owner": _text(e["name"]), "Notes": f"live sheet: FTE {fte:g}. {_text(e['notes'])}".strip()})
+                pooled.setdefault(k, [0.0, 0.0])
+                pooled[k][0] += a
+                pooled[k][1] += fte
+        for k, (a, fte) in pooled.items():
+            if k not in METRICS:
+                staff.append({"Country": country, "Region": "*", "Metric": k, "Apps_Per_FTE_Month": round(a / fte, 1),
+                              "Owner": "", "Notes": f"live sheet: destination total, FTE {fte:g}"})
         log.append({"File": p.name, "Country": country, "Views": n_views, "FTE_Rows": n_fte, "Note": ""})
     return (pd.DataFrame(human, columns=SETTINGS_HUMAN), pd.DataFrame(staff, columns=SETTINGS_STAFF),
             pd.DataFrame(log, columns=["File", "Country", "Views", "FTE_Rows", "Note"]))

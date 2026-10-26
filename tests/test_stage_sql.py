@@ -10,6 +10,7 @@ import fetch_data as fd
 
 def _to_sqlite(sql: str) -> str:
     sql = re.sub(r"DATEADD\(MINUTE,330,([\w\.]+)\)", r"datetime(\1, '+330 minutes')", sql)
+    sql = re.sub(r"CAST\(([\w\.]+) AS NVARCHAR\(\d+\)\)", r"CAST(\1 AS TEXT)", sql).replace("ISNULL(", "IFNULL(")
     sql = sql.replace("SELECT * FROM (VALUES", "SELECT column1 AS StageGroup, column2 AS CountryId, column3 AS StageId FROM (VALUES")
     return re.sub(r"\)\s*v\(StageGroup, CountryId, StageId\)", ")", sql)
 
@@ -17,7 +18,8 @@ def _to_sqlite(sql: str) -> str:
 def _run(history, staff, month="2026-10"):
     con = sqlite3.connect(":memory:")
     pd.DataFrame(history, columns=["AcknowledgementId", "ApplicationStageId", "ChangedOn"]).to_sql("ApplicationHistory", con)
-    pd.DataFrame(staff, columns=["AcknowledgementId", "CountryId", "TagGroupID"]).to_sql("Application_View_Staff", con)
+    pd.DataFrame([(*s, "Sep", "2027") for s in staff],
+                 columns=["AcknowledgementId", "CountryId", "TagGroupID", "Intake", "InYear"]).to_sql("Application_View_Staff", con)
     # cycle 26 Sep - 25 Oct 2026 in IST; ChangedOn is stored in UTC (IST = UTC + 5:30)
     sql = fd.build_stage_sql(datetime(2026, 9, 26), datetime(2026, 10, 25, 23, 59, 59), {}, [4, 81], month)
     out = pd.read_sql(_to_sqlite(sql), con)

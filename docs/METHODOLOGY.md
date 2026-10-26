@@ -219,6 +219,32 @@ last year's pattern.
 **Ranges** are the 10/90 and 25/75 quantiles of the chosen variant's own errors by horizon band.
 Change vs last year is shown only where the same months last year had at least 150 applications.
 
+## 7h. Intake running indicator (`src/analysis/intake_pace.py`)
+For every running intake, the indicator compares how far it has filled with the same intake a year
+earlier. It covers the organisation, destinations and regions, and the metrics received, submitted and
+every stage.
+
+**Data.**
+- The intake extract (receipts and submissions by target Intake / InYear per 26th–25th cycle), plus the
+  stage extract by intake.
+- Season labels map to months: Fall → Sep, Spring → Jan, Summer → May.
+- An intake's count is final 3 months after it starts.
+
+**Pace.** Applications for the intake so far, against the same intake a year earlier counted up to the
+same number of months before its start.
+
+**Projection.** So far ÷ s, where s is the median share of the final count that the last three completed
+same-month intakes already had at that point.
+
+**Test and use.**
+- The projection is re-made walk-forward on completed intakes (last 5 years) at every lead, using only
+  intakes complete at the time. It is scored against the final count, next to "same as last year's final".
+- It is published for a level × metric × lead only where it is at least 3% better on at least 8 intakes
+  (the common decision rule).
+- Its range is the 10/90 quantiles of those test errors.
+- November 2026, destinations: 7% vs 52% at 3 months before the start; 31% vs 50% at 6 months. Not
+  published at 11–12 months.
+
 ## 7b. Measured policy events (`src/analysis/signals.py`)
 For each event in `Settings.xlsx!Policy_Events`, impact = actual / counterfactual − 1 over the
 next 6 months, where the counterfactual is an average of SNaive, SNaiveGrowth, ETS and Theta

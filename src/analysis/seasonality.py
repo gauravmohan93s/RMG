@@ -109,6 +109,39 @@ def productivity_lookup(prod: Optional[pd.DataFrame], default: float = 0.0):
     return f
 
 
+def stage_staffing(stage_fc: pd.DataFrame, productivity: Optional[pd.DataFrame], high: float = 1.10,
+                   low: float = 0.90) -> pd.DataFrame:
+    """Workload rows for the stages after submission (offers, deposits, visa...), in the staffing-calendar
+    layout. Stage forecasts are made per destination, so FTE uses the destination's rate for the stage
+    (live sheet: its regions' volume / FTE); the organisation's FTE is the sum of its destinations'."""
+    if stage_fc is None or stage_fc.empty:
+        return pd.DataFrame()
+    rate = productivity_lookup(productivity, 0.0)
+    rows = []
+    for (lvl, c, s), g in stage_fc.groupby(["Level", "Country", "StageGroup"], sort=False):
+        g = g.sort_values("Date")
+        avg = float(g["Forecast"].mean())
+        apf, src = rate(c, "*", s) if lvl == "Country" else (np.nan, "")
+        for r in g.itertuples():
+            load = r.Forecast / avg if avg > 0 else np.nan
+            hi = getattr(r, "Hi80", np.nan)
+            rows.append({"Level": lvl, "Country": c, "Region": "_TOTAL", "Metric": s,
+                         "Label": "Organisation" if lvl == "Organisation" else c, "Date": pd.Timestamp(r.Date),
+                         "Month_Name": MONTH_NAMES[pd.Timestamp(r.Date).month - 1], "Forecast": r.Forecast,
+                         "Low_80": getattr(r, "Lo80", np.nan), "Capacity_Plan_80": hi, "Load_Index": load,
+                         "Workload_Class": classify(load, high, low), "Historical_Class": "",
+                         "Apps_Per_FTE_Month": apf, "Productivity_Source": src,
+                         "FTE_Base": r.Forecast / apf if apf and np.isfinite(apf) else np.nan,
+                         "FTE_Capacity_80": hi / apf if apf and np.isfinite(apf) and np.isfinite(hi) else np.nan})
+    st = pd.DataFrame(rows)
+    org = st["Level"] == "Organisation"
+    tot = st[st["Level"] == "Country"].groupby(["Metric", "Date"])[["FTE_Base", "FTE_Capacity_80"]].sum(min_count=1)
+    idx = pd.MultiIndex.from_frame(st.loc[org, ["Metric", "Date"]])
+    for c in ("FTE_Base", "FTE_Capacity_80"):
+        st.loc[org, c] = tot[c].reindex(idx).to_numpy()
+    return st
+
+
 def staffing_calendar(fc: pd.DataFrame, sidx: pd.DataFrame, high: float = 1.10, low: float = 0.90,
                       apps_per_fte_month: Optional[float] = None, productivity: Optional[pd.DataFrame] = None,
                       levels: Sequence[str] = ("Organisation", "Country", "Region")) -> pd.DataFrame:

@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from ..data.prepare import METRICS, TOTAL
+from ..data.prepare import METRICS, ORG, TOTAL
 
 
 def test_depth(res) -> Dict[str, int]:
@@ -403,3 +403,87 @@ def vintage_matrix(res, n_vintages: int = 5, metric: str = "Received") -> pd.Dat
     d["_o"] = (d["Level"] != "Organisation").astype(int)
     d = d.sort_values(["_o", "Volume"], ascending=[True, False]).drop(columns=["_o", "Volume"])
     return d[["Destination", "Level"] + cols]
+
+
+# ───────────────────────── story pack: the few sentences that open each chapter ─────────────────────────
+def _p0(v) -> str:
+    return "–" if v is None or not np.isfinite(v) else f"{v:+.0f}%"
+
+
+def last_month(res, level: str = "Organisation", country: str = ORG, metric: str = "Received") -> dict:
+    """The latest closed month: actual vs the forecast published a month before (live), else the tested one."""
+    fva = getattr(res, "forecast_vs_actual", None)
+    if fva is None or fva.empty:
+        return {}
+    f = fva[(fva["Level"] == level) & (fva["Country"] == country) & (fva["Metric"] == metric) & (fva["Months_Ahead"] == 1)]
+    if level == "Country" and f.empty:
+        f = fva[(fva["Level"] == "Region") & (fva["Country"] == country) & (fva["Metric"] == metric)
+                & (fva["Months_Ahead"] == 1)]
+        f = f if f["Region"].nunique() == 1 else f.iloc[0:0]
+    if f.empty:
+        return {}
+    f = f.assign(Target_Month=pd.to_datetime(f["Target_Month"]),
+                 Live=~f["Source"].astype(str).str.startswith("Walk-forward"))
+    f = f.sort_values(["Target_Month", "Live"]).iloc[-1]
+    miss = 100 * (f["Forecast"] / f["Actual"] - 1) if f["Actual"] else np.nan
+    return {"Month": f["Target_Month"], "Actual": float(f["Actual"]), "Forecast": float(f["Forecast"]),
+            "Miss_Pct": miss, "Live": bool(f["Live"])}
+
+
+def intake_rows(res, level: str = "Organisation", country: str = ORG, metric: str = "Received",
+                ahead_only: bool = True) -> pd.DataFrame:
+    """Running intakes for one series, biggest first (intakes still to start when ahead_only)."""
+    p = getattr(res, "intake_pace", None)
+    if p is None or p.empty:
+        return pd.DataFrame()
+    x = p[(p["Level"] == level) & (p["Country"] == country) & (p["Metric"] == metric)]
+    if ahead_only:
+        x = x[x["Months_To_Start"] >= 1]
+    return x.sort_values("Last_Year_Final", ascending=False)
+
+
+def story_messages(res, level: str = "Organisation", country: str = ORG, n: int = 4) -> List[str]:
+    """Up to n short sentences with the numbers that matter, in story order: where we are heading, how last
+    month went, where it comes from, and how the coming intake is filling."""
+    t = res.totals
+    q = t[(t["Level"] == level) & (t["Country"] == country) & (t["Region"] == TOTAL) & (t["Metric"] == "Received")
+          & (t["Window"] == "Next 3 months")]
+    out = []
+    if len(q):
+        r = q.iloc[0]
+        out.append(f"<b>Next quarter ({pd.Timestamp(r['From']):%b}–{pd.Timestamp(r['To']):%b}):</b> about "
+                   f"{_round(r['Forecast'])} applications received, {_p0(r['YoY_Pct'])} on the same months last year; "
+                   f"plan for {_round(r['Lo80'])}–{_round(r['Hi80'])}.")
+    lm = last_month(res, level, country)
+    if lm:
+        word = "above" if lm["Actual"] > lm["Forecast"] else "below"
+        out.append(f"<b>{lm['Month']:%B}:</b> {_round(lm['Actual'])} received against {_round(lm['Forecast'])} forecast "
+                   f"a month before — actual {abs(lm['Miss_Pct']):.0f}% {word} the forecast.")
+    if level == "Organisation":
+        ct = country_table(res)
+        ct = ct[ct["Level"] == "Country"].copy()
+        if len(ct):
+            ct["chg"] = ct["Received_Forecast"] - ct["Received_Last_Year"]
+            up = ct.sort_values("chg", ascending=False).head(2)
+            dn = ct[ct["chg"] < 0].sort_values("chg").head(1)
+            s = "<b>Growth comes from</b> " + _join([f"{r.Country} ({_p0(r.Received_YoY_Pct)})" for r in up.itertuples()])
+            if len(dn):
+                s += f"; {dn.iloc[0]['Country']} is expected to shrink ({_p0(dn.iloc[0]['Received_YoY_Pct'])})"
+            out.append(s + " over the next 12 months.")
+    else:
+        reg = t[(t["Level"] == "Region") & (t["Country"] == country) & (t["Metric"] == "Received")
+                & (t["Window"] == "Next 12 months")].copy()
+        if reg["Region"].nunique() > 1:
+            reg["chg"] = reg["Forecast"] * (1 - 1 / (1 + reg["YoY_Pct"].fillna(0) / 100))
+            up = reg.sort_values("chg", ascending=False).head(2)
+            out.append("<b>Biggest contributions:</b> " + _join(
+                [f"{r.Region} ({_p0(r.YoY_Pct)})" for r in up.itertuples()]) + " over the next 12 months.")
+    it = intake_rows(res, level, country)
+    if len(it):
+        r = it.iloc[0]
+        s = (f"<b>{r['Intake']} intake</b> ({int(r['Months_To_Start'])} months to go): {_round(r['To_Date'], 10)} received "
+             f"so far, {_p0(r['Pace_Pct'])} vs last year at the same point")
+        if np.isfinite(r.get("Projected_Final", np.nan)):
+            s += f"; likely final {_round(r['Projected_Final'])} (last year {_round(r['Last_Year_Final'])})"
+        out.append(s + ".")
+    return out[:n]

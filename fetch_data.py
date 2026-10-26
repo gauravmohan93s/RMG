@@ -239,6 +239,8 @@ WITH
   ),
   StageEvents AS (
     SELECT avs.CountryId, avs.TagGroupID, ah.AcknowledgementId, m.StageGroup,
+           ISNULL(CAST(avs.Intake AS NVARCHAR(50)), '') AS Intake,
+           ISNULL(CAST(avs.InYear AS NVARCHAR(10)), '') AS InYear,
            MIN(DATEADD(MINUTE,330,ah.ChangedOn)) AS FirstReached
     FROM ApplicationHistory ah
     JOIN Application_View_Staff avs ON ah.AcknowledgementId = avs.AcknowledgementId
@@ -248,14 +250,15 @@ WITH
                                                   WHERE o.StageGroup = m.StageGroup AND o.CountryId = avs.CountryId)))
     WHERE avs.CountryId IS NOT NULL
       AND DATEADD(MINUTE,330,ah.ChangedOn) <= '{e}'   -- first reach up to the cycle end
-    GROUP BY avs.CountryId, avs.TagGroupID, ah.AcknowledgementId, m.StageGroup
+    GROUP BY avs.CountryId, avs.TagGroupID, ah.AcknowledgementId, m.StageGroup,
+             ISNULL(CAST(avs.Intake AS NVARCHAR(50)), ''), ISNULL(CAST(avs.InYear AS NVARCHAR(10)), '')
   )
-SELECT '{report_month}' AS ReportMonth, CountryId, TagGroupID, StageGroup,
+SELECT '{report_month}' AS ReportMonth, CountryId, TagGroupID, StageGroup, Intake, InYear,
        COUNT(DISTINCT AcknowledgementId) AS Apps
 FROM StageEvents
 WHERE FirstReached BETWEEN '{s}' AND '{e}'
-GROUP BY CountryId, TagGroupID, StageGroup
-ORDER BY CountryId, TagGroupID, StageGroup;
+GROUP BY CountryId, TagGroupID, StageGroup, Intake, InYear
+ORDER BY CountryId, TagGroupID, StageGroup, Intake, InYear;
 """
 
 
@@ -382,8 +385,10 @@ def main():
         fetch_missing(engine, build_intake_sql, INTAKE_OUTPUT_PATH, ["CountryId", "TagGroupID", "Intake", "InYear"],
                       start_date, end_date, "intake")
     if _stage_groups_active():
-        fetch_missing(engine, build_stage_sql, STAGE_OUTPUT_PATH, ["CountryId", "TagGroupID", "StageGroup"],
-                      start_date, end_date, "stages")
+        # Intake / InYear in the key: an extract saved without them is rebuilt once over the full history,
+        # which also back-fills stage groups added later (v2.4: refused, enrolled, deferred)
+        fetch_missing(engine, build_stage_sql, STAGE_OUTPUT_PATH, ["CountryId", "TagGroupID", "StageGroup", "Intake",
+                                                                   "InYear"], start_date, end_date, "stages")
     else:
         print("ℹ️  [stages] STAGE_GROUPS is empty: stage extract skipped (run --discover-stages first).")
 

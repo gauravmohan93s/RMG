@@ -33,11 +33,13 @@ DATA_ROOT: Path = Path(
 RAW_FILE: Path = DATA_ROOT / _RAW["paths"]["raw_file"]
 INTAKE_FILE: Path = DATA_ROOT / _RAW["paths"].get("intake_file", "intake_final_summary.xlsx")
 STAGE_FILE: Path = DATA_ROOT / _RAW["paths"].get("stage_file", "stage_final_summary.xlsx")
+STAGE_INTAKE_FILE: Path = DATA_ROOT / _RAW["paths"].get("stage_intake_file", "stage_intake_summary.xlsx")
 SETTINGS_FILE: Path = DATA_ROOT / _RAW["paths"]["settings_file"]
 PREDICTIONS_ROOT: Path = DATA_ROOT / "Predictions"
 # executive-facing copies of each month's pack (env override RMG_OUTCOMES_DIR)
 OUTCOMES_ROOT: Path = Path(os.environ.get("RMG_OUTCOMES_DIR") or DATA_ROOT / "Outcomes")
 LIVE_FORMS_DIR: Path = Path(os.environ.get("RMG_LIVE_FORMS_DIR") or DATA_ROOT / "Forms" / "Live")
+NOTIFY: Dict[str, Any] = dict(_RAW.get("notify", {"enabled": False}))   # e-mails: off unless enabled
 
 
 @dataclass(frozen=True)

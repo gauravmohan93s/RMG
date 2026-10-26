@@ -1,4 +1,4 @@
-# RMG Application-Flow Forecasting (v2.4)
+# RMG Application-Flow Forecasting (v2.5)
 
 Monthly 12-month forecast of applications **Received** and **Submitted** for the organisation,
 every destination country and every region. Each forecast comes with ranges that have been tested
@@ -9,7 +9,7 @@ every month.
 | Output | For |
 |---|---|
 | `Outcomes/Latest/` (and `Outcomes/<YYYY-MM> Forecast Pack/`) | Executives: the monthly pack, one PDF per destination, the workbook |
-| `Reports/RMG_Monthly_Pack_<date>.pdf` | Leadership pack: organisation, proof on the last quarter, direction check, destinations, workload, track record and health check, one page per destination |
+| `Reports/RMG_Monthly_Pack_<date>.pdf` | Leadership pack, read as a story: where we are heading, last month and accuracy, where growth comes from, pipeline and the coming intakes, capacity, can we trust it; then two pages per destination down to its regions |
 | `Reports/RMG_Forecast_<date>.xlsx` | Planners and analysts: every number plus all evidence sheets (method decisions, tests, calibration) |
 | `Forms/Live/<Country>.xlsx` | Country teams: a live sheet shared once. Region × month grid of actual, model and their view, plus staffing; read at every run and rolled forward after it |
 | `Final_Forecast/final_forecast.csv` | Downstream systems: every region / country / organisation × month with 50/80/95% ranges |
@@ -39,12 +39,12 @@ Full detail: [docs/METHODOLOGY.md](docs/METHODOLOGY.md); evidence: [docs/experim
 python -m venv .venv_3.12
 .venv_3.12\Scripts\activate
 pip install -r requirements-dev.txt
-python -m pytest                          # 86 tests, synthetic data only
+python -m pytest                          # 90 tests, synthetic data only
 python run_pipeline.py all                # fetch -> transform -> forecast -> report -> publish -> forms (~25 min)
 ```
 
 **Other commands:**
-- `fetch-data`, `transform-data`, `forecast`, `report`, `publish`, `sync-forms`, `refresh-forms`, `version`
+- `fetch-data`, `transform-data`, `forecast`, `report`, `publish`, `sync-forms`, `refresh-forms`, `notify`, `version`
 - options: `--run-date YYYY-MM-DD`, `--skip-fetch`, `--skip-transform`
 - stage-data discovery (read-only): `python fetch_data.py --discover-stages`
 
@@ -66,16 +66,16 @@ src/forecasting/reconcile.py       bottom-up / WLS / MinT / middle-out, chosen o
 src/forecasting/ranges.py          ranges chosen by interval score, sequential and out-of-sample
 src/forecasting/reliability.py     reliability on next-quarter totals of the published forecast
 src/forecasting/engine.py          end-to-end run + artefacts
-src/analysis/                      seasonality and staffing, signals (human inputs, events), intake view
+src/analysis/                      seasonality and staffing, signals (human inputs, events), intake view, intake running indicator
 src/governance/                    manifest, prediction history, decision lock, extract snapshots
-src/reports/                       monthly pack (PDF), workbook, charts, forms, publishing
+src/reports/                       story pack (pack.py) and its blocks (pdf.py), workbook, charts, live sheets, publishing, e-mails
 tests/                             pytest suite (synthetic data only)
 fetch_data.py, transform_data.py   SQL extract (26th-25th cycles, incl. stage data) and ID mapping
 ```
 
 ## Versioning
 Semantic versioning; the version (`src/__init__.py`) is stamped into every output. Releases are git
-tags (`v1.0.0` legacy pipeline, `v2.0.0` this engine, `v2.4.0` current). See
+tags (`v1.0.0` legacy pipeline, `v2.0.0` this engine, `v2.5.0` current). See
 [CHANGELOG.md](CHANGELOG.md) and the plan in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Extending
