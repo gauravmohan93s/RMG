@@ -119,6 +119,15 @@ def _headline(res, S, level: str, country: str, no: str, title: str) -> List:
     out = [_band(no, title, sub, res, S)]
     if level == "Organisation":
         out += _critical_banner(res, S)
+    q = _tot(res, level, country, "Received", "Next 3 months")
+    if q and q.get("Reliability") == "Low":                  # too uncertain for exact numbers: say so up front
+        t = Table([[Paragraph(f"<b>Direction only.</b> Forecasts for {country} have typically missed a quarter by about "
+                              f"±{q.get('Typical_Quarter_Error_Pct', np.nan):.0f}%: read the trend (up or down), not the "
+                              "exact numbers.", S["msg"])]], colWidths=[FULL_W * cm])
+        t.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#ececea")),
+                               ("LINEBEFORE", (0, 0), (0, -1), 3, colors.HexColor("#9a9a95")),
+                               ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3)]))
+        out += [Spacer(0, 3), t]
     return out + [Spacer(0, 5), _tiles(res, level, country, S), Spacer(0, 5), _messages(msgs[1:] or msgs, S),
                   Spacer(0, 5), _charts_pair(res, level, country, 2.7),
                   Spacer(0, 3), _month_strip(res, level, country, S), PageBreak()]
@@ -268,8 +277,12 @@ def _ch2_accuracy(res, S) -> List:
         w0 = 4.0
         right = _table(data, [w0] + [(HALF - w0) / len(vcols)] * len(vcols), st, font=6.6)
     fva = res.forecast_vs_actual
-    ch = [_img(charts.track_record(fva, "Organisation", ORG, m, f"Track record — applications {m.lower()}",
-                                   size=(6.4, 2.6)), HALF) for m in ("Received", "Submitted")]
+    rev = ins.revisions(res)
+    ch = [_img(charts.track_record(fva, "Organisation", ORG, "Received", "Did we get it right? Applications received",
+                                   size=(6.4, 2.6)), HALF),
+          _img(charts.revision_bars(rev, size=(6.4, 2.6)), HALF) if rev else
+          _img(charts.track_record(fva, "Organisation", ORG, "Submitted", "Track record — applications submitted",
+                                   size=(6.4, 2.6)), HALF)]
     out = [_band("2", "Last month and how accurate we have been",
                  "What we forecast against what happened: last month, the last full quarter, and every recent forecast.",
                  res, S), Spacer(0, 5), _row(tiles, [w + 0.08] * 4), Spacer(0, 6)]
@@ -413,7 +426,7 @@ def _fte_table(res):
     q = x[x["Date"] < x["Date"].min() + pd.DateOffset(months=3)]
     piv = q.pivot_table(index=["Level", "Label"], columns="Metric", values="FTE_Capacity_80", aggfunc="max").reset_index()
     mets = [m for m in ["Received", "Submitted"] + list(STAGE_ORDER) if m in piv.columns]
-    data = [["FTE needed at the busiest month of next quarter (plan for)"] + [STAGE_LABEL.get(m, m) for m in mets]]
+    data = [["Staff (FTE) needed at the busiest month of next quarter, planning on the upper end"] + [STAGE_LABEL.get(m, m) for m in mets]]
     for _, r in piv.sort_values("Level", ascending=False).iterrows():
         data.append([r["Label"]] + [f"{r[m]:.1f}" if np.isfinite(r[m]) else "–" for m in mets])
     return _table(data, [7.0] + [(FULL_W - 7.0) / len(mets)] * len(mets), font=7.0)
@@ -467,7 +480,7 @@ def _ch6_trust(res, S) -> List:
                           "test to be used; choices are locked for a quarter and reviewed in Jan, Apr, Jul and Oct.", S["note"])]
     rs = ins.reliability_summary(res)
     if len(rs):
-        data = [["Reliability (regions)", "Series", "Share of forecast volume"]]
+        data = [["How sure (regions)", "Series", "Share of forecast volume"]]
         for r in rs.itertuples():
             data.append([r.Reliability, str(r.Series), f"{r.Volume_Share_Pct:.0f}%"])
         rel = _table(data, [3.4, 1.8, 3.4], font=7.0)
@@ -493,7 +506,7 @@ def _region_table(res, country: str, top: int = 12):
          .join(sel("Submitted", "Next 12 months").set_index("Region")["Forecast"].rename("S"))
          .sort_values("Forecast", ascending=False))
     rest = x.iloc[top:]
-    data, st = [["Region / team", "Next quarter", "Next 12 m", "vs last year", "Submitted 12 m", "Reliability"]], []
+    data, st = [["Region / team", "Next quarter", "Next 12 m", "vs last year", "Submitted 12 m", "How sure"]], []
     for i, (reg, r) in enumerate(x.iloc[:top].iterrows(), start=1):
         data.append([reg, _n(r["Q"], True), _n(r["Forecast"], True), _pct(r["YoY_Pct"]), _n(r["S"], True), r["Reliability"]])
         if r["Reliability"] in REL_BG:
@@ -553,9 +566,10 @@ ACTION_COLOR = {"Staffing": colors.HexColor("#2a78d6"), "Conversion": colors.Hex
                 "Watch": colors.HexColor("#b36b00")}
 
 
-def _page_glance(res, S) -> List:
-    g = ins.glance(res)
-    out = [_band("", "At a glance", "The month in one page: what is coming, where it is coming from, and what to act on.",
+def _page_glance(res, S, level: str = "Organisation", country: str = ORG) -> List:
+    g = ins.glance(res, level, country)
+    title = "At a glance" if level == "Organisation" else f"{country} — at a glance"
+    out = [_band("", title, "The month in one page: what is coming, where it is coming from, and what to act on.",
                  res, S), Spacer(0, 6), _img(charts.kpi_cards(g), FULL_W), Spacer(0, 6)]
     if g["alert"]:
         t = Table([[Paragraph(f"<b>Conversion alert.</b> {g['alert']}", ParagraphStyle(
@@ -565,7 +579,10 @@ def _page_glance(res, S) -> List:
                                ("BOTTOMPADDING", (0, 0), (-1, -1), 4)]))
         out += [t, Spacer(0, 6)]
     left = _img(charts.stage_leak(g["leak"], g["season"], size=(6.4, 3.25)), HALF)
-    right = (_img(charts.traffic_grid(g["grid"], g["season"], size=(6.4, 3.25)), HALF) if len(g["grid"]) else "")
+    right = (_img(charts.traffic_grid(g["grid"], g["season"], f"{g['children']} at a glance", size=(6.4, 3.25)), HALF)
+             if len(g["grid"]) > 1 else
+             _img(charts.track_record(res.forecast_vs_actual, level, country, "Received",
+                                      "Did we get it right? Forecast vs actual", size=(6.4, 3.25)), HALF))
     out += [_row([left, right], [HALF + 0.3, HALF]), Spacer(0, 6)]
     head = ParagraphStyle("ah", parent=S["msg"], fontName="Helvetica-Bold", fontSize=9, leading=11, leftIndent=0)
     body = ParagraphStyle("ab", parent=S["msg"], fontSize=8.4, leading=10.6, leftIndent=0)
@@ -597,7 +614,7 @@ def write_story(res, path: Path) -> Path:
 
 def write_country_pack(res, country: str, label: str, path: Path) -> Path:
     S = _s()
-    story = _destination(res, S, country, label)
+    story = _page_glance(res, S, "Country", country) + _destination(res, S, country, label)
     if isinstance(story[-1], PageBreak):
         story = story[:-1]
     _doc(path, f"Application Flow Forecast — {label}").build(story, onFirstPage=_footer, onLaterPages=_footer)

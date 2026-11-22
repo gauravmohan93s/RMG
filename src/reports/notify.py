@@ -47,6 +47,23 @@ def _k(v) -> str:
     return "–" if v is None or not np.isfinite(v) else f"{round(v / 100) * 100:,.0f}"
 
 
+def glance_png(res, pack: Optional[Path]) -> Optional[bytes]:
+    """Page 1 of the pack ('At a glance') as a picture for the e-mail body; the headline cards if the PDF cannot be
+    rendered here."""
+    try:
+        import pymupdf
+        if pack and Path(pack).exists():
+            with pymupdf.open(str(pack)) as d:
+                return d[0].get_pixmap(dpi=110).tobytes("png")
+    except Exception:                                # noqa: BLE001 - fall back to the cards alone
+        pass
+    try:
+        from . import charts
+        return charts.kpi_cards(ins.glance(res))
+    except Exception:                                # noqa: BLE001 - the e-mail still goes without a picture
+        return None
+
+
 def summary_email(res, cfg: dict, pack: Optional[Path], outcomes_dir: Path) -> EmailMessage:
     first = pd.Timestamp(res.forecast["Date"].min())
     q = res.totals[(res.totals["Level"] == "Organisation") & (res.totals["Metric"] == "Received")
@@ -65,8 +82,10 @@ def summary_email(res, cfg: dict, pack: Optional[Path], outcomes_dir: Path) -> E
         f"<td align=right>{_k(getattr(r, 'Received_Next_Quarter', np.nan))}</td><td align=right>{_k(r.Received_Forecast)}</td>"
         f"<td align=right>{r.Received_YoY_Pct:+.0f}%</td><td>{html.escape(str(r.Received_Reliability))}</td></tr>"
         for r in ct.itertuples())
+    png = glance_png(res, pack)
     body = f"""<html><body style="font-family:Calibri,Arial,sans-serif;font-size:11pt;color:#0b0b0b">
 <p>The application-flow forecast for <b>{first:%B %Y}</b> onwards is ready (actuals to {res.last_actual:%B %Y}).</p>
+{'<p><img src="cid:glance" alt="At a glance" style="width:100%;max-width:1000px;border:1px solid #d0d7e2"></p>' if png else ''}
 <ul>{bullets}</ul>
 <table cellpadding=4 cellspacing=0 style="border-collapse:collapse;font-size:10pt">
 <tr style="background:#eef2f7"><th align=left>Destination</th><th>Next quarter</th><th>Next 12 months</th><th>vs last year</th>
@@ -77,6 +96,8 @@ workbook are in <b>{html.escape(str(outcomes_dir))}</b>{' — the pack is attach
 forecasting pipeline.</p></body></html>"""
     msg.set_content("The monthly forecast pack is ready. Open this message in an HTML-capable mail client.")
     msg.add_alternative(body, subtype="html")
+    if png:                                          # the "At a glance" page, shown inside the e-mail
+        msg.get_payload()[1].add_related(png, maintype="image", subtype="png", cid="<glance>")
     if pack and Path(pack).exists() and Path(pack).stat().st_size < MAX_ATTACH_MB * 2 ** 20:
         msg.add_attachment(Path(pack).read_bytes(), maintype="application", subtype="pdf", filename=Path(pack).name)
     return msg

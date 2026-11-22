@@ -144,7 +144,7 @@ def _tiles(res, level: str, country: str, S) -> Table:
                 if np.isfinite(width) and width > WIDE_RANGE else f"{_pct(r.get('YoY_Pct'))} vs same months last year")
         return _tile(label, _n(r["Forecast"], small),
                      [f"Most likely <b>{_n(r.get('Lo50'), small)} – {_n(r.get('Hi50'), small)}</b>",
-                      f"Plan for <b>{_n(r.get('Lo80'), small)} – {_n(r.get('Hi80'), small)}</b>", last], S, w)
+                      f"Plan between <b>{_n(r.get('Lo80'), small)} and {_n(r.get('Hi80'), small)}</b>", last], S, w)
 
     q_lab = (f"Received · next quarter ({pd.Timestamp(r3['From']):%b}–{pd.Timestamp(r3['To']):%b})" if r3
              else "Received · next quarter")
@@ -159,7 +159,7 @@ def _tiles(res, level: str, country: str, S) -> Table:
              "if very different, confirm with the market"]
     tiles = [vol(q_lab, r3), _fy_tile(res, level, country, "Received", S, w, small),
              vol("Received · next 12 months", r12), _fy_tile(res, level, country, "Submitted", S, w, small),
-             _tile("Reliability", rel, rel_lines, S, w, accent=REL_BG.get(rel)),
+             _tile("How sure are we", rel, rel_lines, S, w, accent=REL_BG.get(rel)),
              _tile("Market now: last 6 months vs a year earlier", _pct(recent), trend, S, w)]
     return _row(tiles, [w + 0.08] * 6)
 
@@ -176,7 +176,7 @@ def _fy_tile(res, level: str, country: str, metric: str, S, w: float, small: boo
     r = x.iloc[0]
     lines = [f"{_n(r['Actual_To_Date'], small)} done ({int(r['Months_Actual'])} m) + {_n(r['Forecast_Remaining'], small)} to come"]
     if "Outlook_Lo80" in r and np.isfinite(r.get("Outlook_Lo80", np.nan)):
-        lines.append(f"Plan for <b>{_n(r['Outlook_Lo80'], small)} – {_n(r['Outlook_Hi80'], small)}</b>")
+        lines.append(f"Plan between <b>{_n(r['Outlook_Lo80'], small)} and {_n(r['Outlook_Hi80'], small)}</b>")
     lines.append(f"{_pct(r['YoY_Pct'])} vs last fiscal year")
     return _tile(f"{metric} · {r['Period']} outlook", _n(r["Outlook"], small), lines, S, w)
 
@@ -189,7 +189,7 @@ def _month_strip(res, level: str, country: str, S) -> Table:
     small = fr["Forecast"].sum() < 5000
     data = [["Month"] + [f"{d:%b %y}" for d in fr["Date"]],
             ["Received"] + [_n(v, small) for v in fr["Forecast"]],
-            ["  plan for"] + [f"{_n(a, small)}–{_n(b, small)}" for a, b in zip(fr["Lo80"], fr["Hi80"])],
+            ["  plan between"] + [f"{_n(a, small)}–{_n(b, small)}" for a, b in zip(fr["Lo80"], fr["Hi80"])],
             ["Submitted"] + [_n(v, small) for v in fs.set_index("Date")["Forecast"].reindex(fr["Date"])]]
     if "Previous_Forecast" in fr and fr["Previous_Forecast"].notna().any():
         data.insert(3, ["  last month's fcst"] + [_n(v, small) if np.isfinite(v) else "new" for v in fr["Previous_Forecast"]])
@@ -209,8 +209,8 @@ def _month_strip(res, level: str, country: str, S) -> Table:
 
 def _destination_table(res) -> Table:
     ct = ins.country_table(res)
-    hdr = ["Destination", "Next quarter", "Next 12 months", "Plan for (12 m)", "vs last year", "Market now*",
-           "vs last run", "Submitted (12 m)", "Reliability"]
+    hdr = ["Destination", "Next quarter", "Next 12 months", "Plan between (12 m)", "vs last year", "Market now*",
+           "vs last run", "Submitted (12 m)", "How sure"]
     data, st = [hdr], []
     for i, r in enumerate(ct.itertuples(), start=1):
         small = r.Received_Forecast < 5000
@@ -527,9 +527,9 @@ def _page_legend(res, S) -> List:
     items = [
         ("Forecast", "The single most likely number, from the method that tested most accurate for that series."),
         ("Most likely range", "The actual should land inside it about 1 time in 2 (dark band on charts)."),
-        ("Plan for range", "The actual should land inside it about 8 times in 10 (light band). Use the upper end for "
+        ("Plan between", "The actual should land inside it about 8 times in 10 (light band). Use the upper end for "
                            "capacity and the lower end for commitments."),
-        ("Reliability", "Typical miss on a quarter total in testing:  High up to 10%   ·   Medium 10–20%   ·   "
+        ("How sure are we", "Typical miss on a quarter total in testing:  High up to 10%   ·   Medium 10–20%   ·   "
                         "Low over 20%   ·   New = too little history."),
         ("Market now", "Actual growth in the last 6 months. If it differs a lot from the forecast growth, the forecast "
                        "is assuming a change of pace — confirm with the market team."),
@@ -548,8 +548,8 @@ def _footer(canvas, doc):
     canvas.saveState()
     canvas.setFont("Helvetica", 6.8)
     canvas.setFillColor(INK2)
-    canvas.drawString(MARGIN, 0.5 * cm, "Dark band = most likely (1 in 2)   ·   light band = plan for (8 in 10)   ·   "
-                                        "Reliability = typical miss on a quarter total: High up to 10%, Medium 10-20%, "
+    canvas.drawString(MARGIN, 0.5 * cm, "Dark band = most likely (1 in 2)   ·   light band = plan between (8 in 10)   ·   "
+                                        "How sure: High = quarter totals usually within 10%, Medium 10-20%, "
                                         "Low over 20%")
     canvas.drawRightString(PAGE_W - MARGIN, 0.5 * cm, f"Page {doc.page}")
     canvas.restoreState()

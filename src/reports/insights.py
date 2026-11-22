@@ -493,70 +493,177 @@ def story_messages(res, level: str = "Organisation", country: str = ORG, n: int 
 # ───────────────────────── "At a glance" page (operations / HR readers) ─────────────────────────
 LEAK_STAGES = ("Received", "Submitted", "Offer", "Deposit", "Visa_Document", "Visa_Applied", "Visa_Granted")
 LEAK_ALERT_PP = 15.0       # deposits growing this many points slower than applications -> conversion alert
-BEHIND_PCT = -10.0         # a destination's ongoing intake this far behind last year -> on the watch list
-MIN_SIZE = 500             # destinations smaller than this (last year's season) are not called out
+BEHIND_PCT = -10.0         # an ongoing intake this far behind last year -> on the watch list
+MIN_SIZE = {"Organisation": 500, "Country": 150}   # smaller destinations / regions are not called out
+TRACK_MONTHS = 6           # "did we get it right?": the last 6 months
+TRACK_OK, TRACK_NEAR = 10.0, 20.0   # within 10% = right, 10-20% = close, more = missed
+STAFF_COVER = 0.5          # staff numbers shown once headcount covers at least half of the volume
 
 
-def glance(res) -> dict:
-    """Everything the 'At a glance' page shows, computed once (and tested): headline cards, the stage
-    'leak' for the ongoing intake season, the destination traffic grid and three plain-language actions."""
+def _track(res, level: str, country: str) -> List[dict]:
+    """The last TRACK_MONTHS months: forecast made one month before (published where available, else re-made in
+    testing) vs actual."""
+    fva = getattr(res, "forecast_vs_actual", None)
+    if fva is None or fva.empty:
+        return []
+    f = fva[(fva["Level"] == level) & (fva["Country"] == country) & (fva["Metric"] == "Received")
+            & (fva["Months_Ahead"] == 1)]
+    if level == "Country" and f["Target_Month"].nunique() < TRACK_MONTHS:
+        r = fva[(fva["Level"] == "Region") & (fva["Country"] == country) & (fva["Metric"] == "Received")
+                & (fva["Months_Ahead"] == 1)]
+        if r["Region"].nunique() == 1:
+            f = r
+    if f.empty:
+        return []
+    f = f.assign(Target_Month=pd.to_datetime(f["Target_Month"]),
+                 Live=~f["Source"].astype(str).str.startswith("Walk-forward"))
+    f = f.sort_values(["Target_Month", "Live"]).groupby("Target_Month").tail(1).tail(TRACK_MONTHS)
+    out = []
+    for r in f.itertuples():
+        d = 100 * (r.Actual / r.Forecast - 1) if r.Forecast else np.nan
+        out.append({"month": r.Target_Month, "actual": float(r.Actual), "forecast": float(r.Forecast), "diff": d,
+                    "verdict": "right" if abs(d) <= TRACK_OK else "close" if abs(d) <= TRACK_NEAR else "missed"})
+    return out
+
+
+def _staff(res, level: str, country: str, peak_date) -> Optional[dict]:
+    """Staff needed at the busiest month vs today, once the live sheets carry headcount (rates per region)."""
+    st = getattr(res, "staffing", None)
+    if st is None or st.empty or "Apps_Per_FTE_Month" not in st or peak_date is None:
+        return None
+    s = st.assign(Date=pd.to_datetime(st["Date"]))
+    reg = s[(s["Level"] == "Region") & (s["Metric"] == "Received") & s["Apps_Per_FTE_Month"].notna()]
+    if level == "Country":
+        reg = reg[reg["Country"] == country]
+    if reg.empty:
+        return None
+    h = res.history.assign(Date=pd.to_datetime(res.history["Date"]))
+    last = pd.Timestamp(res.last_actual)
+    avg = (h[(h["Level"] == "Region") & (h["Metric"] == "Received") & (h["Date"] > last - pd.DateOffset(months=12))]
+           .groupby(["Country", "Region"])["Actual"].sum() / 12)
+    rates = reg.groupby(["Country", "Region"])["Apps_Per_FTE_Month"].first()
+    today = sum(avg.get(k, 0.0) / r for k, r in rates.items() if r > 0)
+    pk = reg[reg["Date"] == peak_date]
+    need = float(pk["FTE_Capacity_80"].sum()) if "FTE_Capacity_80" in pk else np.nan
+    all_reg = s[(s["Level"] == "Region") & (s["Metric"] == "Received") & (s["Date"] == peak_date)]
+    if level == "Country":
+        all_reg = all_reg[all_reg["Country"] == country]
+    cover = float(pk["Forecast"].sum() / all_reg["Forecast"].sum()) if all_reg["Forecast"].sum() else 0.0
+    if cover < STAFF_COVER or not np.isfinite(need) or today <= 0:
+        return None
+    return {"need": need, "today": today, "cover": cover}
+
+
+def glance(res, level: str = "Organisation", country: str = ORG) -> dict:
+    """Everything an 'At a glance' page shows, for the organisation (children = destinations) or one destination
+    (children = its regions / teams): headline cards, the stage 'leak' for the ongoing intake season, the traffic
+    grid, the last six months' track record, staff needed at the peak, and three plain-language actions."""
     t, fc = res.totals, res.forecast
-    q = t[(t["Level"] == "Organisation") & (t["Metric"] == "Received") & (t["Window"] == "Next 3 months")]
+    own = lambda d: d[(d["Level"] == level) & (d["Country"] == country) & (d["Region"] == TOTAL)]
+    q = own(t)
+    q = q[(q["Metric"] == "Received") & (q["Window"] == "Next 3 months")]
     q = q.iloc[0] if len(q) else None
-    om = fc[(fc["Level"] == "Organisation") & (fc["Metric"] == "Received")].sort_values("Date")
+    om = own(fc)
+    om = om[om["Metric"] == "Received"].assign(Date=lambda d: pd.to_datetime(d["Date"])).sort_values("Date")
     peak = om.loc[om["Forecast"].idxmax()] if len(om) else None
-    out = {"next_quarter": None if q is None else {
+    conf = str(q.get("Reliability", "")) if q is not None else ""
+    out = {"level": level, "name": "Organisation" if level == "Organisation" else country,
+           "next_quarter": None if q is None else {
                "value": float(q["Forecast"]), "yoy": float(q["YoY_Pct"]), "lo": float(q["Lo80"]), "hi": float(q["Hi80"]),
-               "from": pd.Timestamp(q["From"]), "to": pd.Timestamp(q["To"]),
-               "confidence": str(q.get("Reliability", "")), "miss": float(q.get("Typical_Quarter_Error_Pct", np.nan))},
-           "months": om[["Date", "Forecast"]].assign(Date=lambda d: pd.to_datetime(d["Date"])) if len(om) else pd.DataFrame(),
+               "from": pd.Timestamp(q["From"]), "to": pd.Timestamp(q["To"]), "confidence": conf,
+               "miss": float(q.get("Typical_Quarter_Error_Pct", np.nan))},
+           "direction_only": conf == "Low",
+           "months": om[["Date", "Forecast"]] if len(om) else pd.DataFrame(),
            "peak": None if peak is None else {"date": pd.Timestamp(peak["Date"]), "value": float(peak["Forecast"])}}
+    out["track"] = _track(res, level, country)
+    out["staff"] = _staff(res, level, country, out["peak"]["date"] if out["peak"] else None)
     p = getattr(res, "intake_pace", None)
-    on = (p[(p["Phase"] == "Ongoing") & (p["Region"] == TOTAL)] if p is not None and len(p) and "Phase" in p
-          else pd.DataFrame(columns=["Level", "Country", "Metric", "Pace_Pct", "Intake", "Last_Year_Final"]))
-    org = on[on["Level"] == "Organisation"].set_index("Metric")
-    out["season"] = org["Intake"].iloc[0] if len(org) else ""
-    out["intake_pace"] = float(org.loc["Received", "Pace_Pct"]) if "Received" in org.index else np.nan
-    out["leak"] = [(m, float(org.loc[m, "Pace_Pct"])) for m in LEAK_STAGES
-                   if m in org.index and np.isfinite(org.loc[m, "Pace_Pct"])]
+    on = (p[p["Phase"] == "Ongoing"] if p is not None and len(p) and "Phase" in p
+          else pd.DataFrame(columns=["Level", "Country", "Region", "Metric", "Pace_Pct", "Intake", "Last_Year_Final"]))
+    me = own(on).set_index("Metric")
+    out["season"] = me["Intake"].iloc[0] if len(me) else (on["Intake"].iloc[0] if len(on) else "")
+    out["intake_pace"] = float(me.loc["Received", "Pace_Pct"]) if "Received" in me.index else np.nan
+    out["leak"] = [(m, float(me.loc[m, "Pace_Pct"])) for m in LEAK_STAGES
+                   if m in me.index and np.isfinite(me.loc[m, "Pace_Pct"])]
     rp = out["intake_pace"]
-    dp = float(org.loc["Deposit", "Pace_Pct"]) if "Deposit" in org.index else np.nan
+    dp = float(me.loc["Deposit", "Pace_Pct"]) if "Deposit" in me.index else np.nan
     out["alert"] = (f"Applications for {out['season']} are {rp:+.0f}% on last year, but deposits only {dp:+.0f}%: "
                     "fewer applications are turning into deposits." if np.isfinite(rp) and np.isfinite(dp)
                     and rp - dp >= LEAK_ALERT_PP else "")
-    # destination grid
-    ct = t[(t["Level"] == "Country") & (t["Metric"] == "Received")]
-    q3 = ct[ct["Window"] == "Next 3 months"].set_index("Country")
-    y12 = ct[ct["Window"] == "Next 12 months"].set_index("Country")["Forecast"].sort_values(ascending=False)
-    cty = on[on["Level"] == "Country"]
-    pace = lambda m: cty[cty["Metric"] == m].set_index("Country")["Pace_Pct"]
-    size = cty[cty["Metric"] == "Received"].set_index("Country")["Last_Year_Final"]
+    # children: destinations of the organisation, or regions / teams of a destination
+    if level == "Organisation":
+        kid_t = t[t["Level"] == "Country"].assign(Key=lambda d: d["Country"])
+        kid_p = on[on["Level"] == "Country"].assign(Key=lambda d: d["Country"])
+        kid_f = fc[fc["Level"] == "Country"].assign(Key=lambda d: d["Country"])
+        floor = 200
+    else:
+        kid_t = t[(t["Level"] == "Region") & (t["Country"] == country)].assign(Key=lambda d: d["Region"])
+        kid_p = on[(on["Level"] == "Region") & (on["Country"] == country)].assign(Key=lambda d: d["Region"])
+        kid_f = fc[(fc["Level"] == "Region") & (fc["Country"] == country)].assign(Key=lambda d: d["Region"])
+        floor = 50
+    kt = kid_t[kid_t["Metric"] == "Received"]
+    q3 = kt[kt["Window"] == "Next 3 months"].set_index("Key")
+    y12 = kt[kt["Window"] == "Next 12 months"].set_index("Key")["Forecast"].sort_values(ascending=False)
+    pace = lambda m: kid_p[kid_p["Metric"] == m].set_index("Key")["Pace_Pct"]
+    size = kid_p[kid_p["Metric"] == "Received"].set_index("Key")["Last_Year_Final"]
     rec, dep = pace("Received"), pace("Deposit")
     grid = []
-    for c in y12.index:
-        if c not in q3.index or not np.isfinite(q3.loc[c, "Forecast"]) or y12[c] < 200:
+    for k in y12.index:
+        if k not in q3.index or not np.isfinite(q3.loc[k, "Forecast"]) or y12[k] < floor:
             continue
-        grid.append({"Destination": c, "Next quarter": float(q3.loc[c, "YoY_Pct"]),
-                     "Intake": float(rec.get(c, np.nan)), "Deposits": float(dep.get(c, np.nan)),
-                     "Confidence": str(q3.loc[c, "Reliability"]), "Miss": float(q3.loc[c, "Typical_Quarter_Error_Pct"])})
-    out["grid"] = pd.DataFrame(grid)
+        grid.append({"Destination": k, "Next quarter": float(q3.loc[k, "YoY_Pct"]),
+                     "Intake": float(rec.get(k, np.nan)), "Deposits": float(dep.get(k, np.nan)),
+                     "Confidence": str(q3.loc[k, "Reliability"]), "Miss": float(q3.loc[k, "Typical_Quarter_Error_Pct"])})
+    out["grid"] = pd.DataFrame(grid).head(12)
+    out["children"] = "Destinations" if level == "Organisation" else "Regions / teams"
     # actions
-    acts = []
+    acts, small = [], MIN_SIZE["Organisation" if level == "Organisation" else "Country"]
     if out["peak"]:
-        big = (fc[(fc["Level"] == "Country") & (fc["Metric"] == "Received") & (pd.to_datetime(fc["Date"]) == out["peak"]["date"])]
-               .sort_values("Forecast", ascending=False)["Country"].head(2).tolist())
-        acts.append(("Staffing", f"Busiest month ahead: {out['peak']['date']:%B %Y}, about {_round(out['peak']['value'])} "
-                                 f"applications" + (f" — mostly {_join(big)}." if big else ".")))
-    leaky = [(c, rec[c] - dep[c]) for c in rec.index if c in dep.index and np.isfinite(rec[c]) and np.isfinite(dep[c])
-             and size.get(c, 0) >= MIN_SIZE and rec[c] - dep[c] >= LEAK_ALERT_PP]
-    leaky = [c for c, _ in sorted(leaky, key=lambda x: -x[1])[:3]]
+        kf = kid_f[(kid_f["Metric"] == "Received") & (pd.to_datetime(kid_f["Date"]) == out["peak"]["date"])]
+        big = kf.sort_values("Forecast", ascending=False)["Key"].head(2).tolist() if len(y12) > 1 else []
+        txt = (f"Busiest month ahead: {out['peak']['date']:%B %Y}, about {_round(out['peak']['value'])} applications"
+               + (f" — mostly {_join(big)}." if big else "."))
+        if out["staff"]:
+            s = out["staff"]
+            txt += f" Plan for about {s['need']:.0f} staff then (about {s['today']:.0f} today)."
+        else:
+            txt += " Add today's headcount in the live sheet to see the staff needed."
+        acts.append(("Staffing", txt))
+    if level == "Country" and len(y12) <= 1:          # single region: judge the destination itself
+        rec = pd.Series({out["name"]: rp})
+        dep = pd.Series({out["name"]: dp})
+        size = pd.Series({out["name"]: small})
+    leaky = [(k, rec[k] - dep[k]) for k in rec.index if k in dep.index and np.isfinite(rec[k]) and np.isfinite(dep[k])
+             and size.get(k, 0) >= small and rec[k] - dep[k] >= LEAK_ALERT_PP]
+    leaky = [k for k, _ in sorted(leaky, key=lambda x: -x[1])[:3]]
     acts.append(("Conversion", f"Deposits are growing much slower than applications in {_join(leaky)}: check offer "
                                "follow-up and deposit chasing." if leaky else
-                 "Deposits are keeping pace with applications in every large destination."))
-    behind = [c for c in rec.index if np.isfinite(rec[c]) and rec[c] <= BEHIND_PCT and size.get(c, 0) >= MIN_SIZE]
-    behind = sorted(behind, key=lambda c: rec[c])[:3]
-    acts.append(("Watch", f"Behind last year for {out['season']}: " + _join([f"{c} ({rec[c]:+.0f}%)" for c in behind]) +
-                 " — review with the market teams." if behind else
-                 f"No large destination is more than {abs(BEHIND_PCT):.0f}% behind last year for {out['season']}."))
+                 "Deposits are keeping pace with applications" + (
+                     "." if level == "Country" and len(y12) <= 1 else
+                     f" in every large {'destination' if level == 'Organisation' else 'region'}.")))
+    behind = [k for k in rec.index if np.isfinite(rec[k]) and rec[k] <= BEHIND_PCT and size.get(k, 0) >= small]
+    behind = sorted(behind, key=lambda k: rec[k])[:3]
+    acts.append(("Watch", f"Behind last year for {out['season']}: " + _join([f"{k} ({rec[k]:+.0f}%)" for k in behind]) +
+                 " — review with the teams." if behind else
+                 f"Nothing large is more than {abs(BEHIND_PCT):.0f}% behind last year for {out['season']}."))
     out["actions"] = acts
     return out
+
+
+def revisions(res, metric: str = "Received") -> dict:
+    """What changed since last month's forecast, on the months both forecasts cover: organisation change and the
+    change per destination (biggest movers first)."""
+    f = res.forecast
+    c = f[f["Level"].isin(["Country", "Organisation"]) & (f["Metric"] == metric) & (f["Region"] == TOTAL)]
+    if "Previous_Forecast" not in c or not c["Previous_Forecast"].notna().any():
+        return {}
+    c = c[c["Previous_Forecast"].notna()]
+    g = c.groupby(["Level", "Country"])[["Forecast", "Previous_Forecast"]].sum().reset_index()
+    g["Change"] = g["Forecast"] - g["Previous_Forecast"]
+    org = g[g["Level"] == "Organisation"]
+    dest = g[g["Level"] == "Country"].sort_values("Change")
+    if org.empty:
+        return {}
+    o = org.iloc[0]
+    return {"change": float(o["Change"]), "pct": 100 * float(o["Change"] / o["Previous_Forecast"]),
+            "months": int(c["Date"].nunique()), "by_destination": dest[["Country", "Change"]].reset_index(drop=True)}

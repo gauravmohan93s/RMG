@@ -391,11 +391,39 @@ def main():
                                                                    "InYear"], start_date, end_date, "stages")
     else:
         print("ℹ️  [stages] STAGE_GROUPS is empty: stage extract skipped (run --discover-stages first).")
+    if not (DATA_ROOT / "lead_discovery.xlsx").exists():      # once: find enquiry / lead tables (read-only)
+        try:
+            discover_leads(engine)
+        except Exception as exc:                                  # noqa: BLE001 - never blocks the monthly fetch
+            print(f"ℹ️  [leads] discovery skipped: {type(exc).__name__}")
+
+
+LEAD_DISCOVERY_SQL = """
+SELECT c.TABLE_SCHEMA AS [Schema], c.TABLE_NAME AS [Table], c.COLUMN_NAME AS [Column], c.DATA_TYPE AS [Type],
+       (SELECT SUM(p.rows) FROM sys.partitions p
+         WHERE p.object_id = OBJECT_ID(QUOTENAME(c.TABLE_SCHEMA) + '.' + QUOTENAME(c.TABLE_NAME)) AND p.index_id IN (0, 1)) AS [Rows]
+FROM INFORMATION_SCHEMA.COLUMNS c
+WHERE c.TABLE_NAME LIKE '%Lead%' OR c.TABLE_NAME LIKE '%Enquir%' OR c.TABLE_NAME LIKE '%Inquir%'
+   OR c.TABLE_NAME LIKE '%Prospect%' OR c.TABLE_NAME LIKE '%Registration%' OR c.TABLE_NAME LIKE '%Counsell%'
+   OR c.TABLE_NAME LIKE '%Appointment%' OR c.TABLE_NAME LIKE '%FollowUp%'
+ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION;
+"""
+
+
+def discover_leads(engine, out_path: Path = DATA_ROOT / "lead_discovery.xlsx") -> Path:
+    """Read-only: tables that may hold enquiries / leads / counselling appointments, with their columns and row
+    counts, so a leading indicator for receipts can be chosen and tested (v2.8 roadmap)."""
+    df = execute_query(LEAD_DISCOVERY_SQL, engine)
+    df.to_excel(out_path, index=False)
+    print(f"✅ Lead discovery written to {out_path} ({df['Table'].nunique() if len(df) else 0} tables)")
+    return out_path
 
 
 if __name__ == "__main__":
     import sys
     if "--discover-stages" in sys.argv:
         discover_stages(make_engine())
+    elif "--discover-leads" in sys.argv:
+        discover_leads(make_engine())
     else:
         main()

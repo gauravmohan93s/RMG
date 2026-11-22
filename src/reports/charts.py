@@ -207,7 +207,7 @@ def pack_forecast(hist: pd.DataFrame, fc: pd.DataFrame, metric: str, title: str,
     _style(ax)
     _kfmt(ax)
     if len(f):
-        ax.fill_between(f["Date"], f["Lo80"], f["Hi80"], color=color, alpha=0.13, lw=0, label="Plan for (8 in 10)")
+        ax.fill_between(f["Date"], f["Lo80"], f["Hi80"], color=color, alpha=0.13, lw=0, label="Plan between (8 in 10)")
         if "Lo50" in f:
             ax.fill_between(f["Date"], f["Lo50"], f["Hi50"], color=color, alpha=0.30, lw=0, label="Most likely (1 in 2)")
         ax.plot(f["Date"], f["Forecast"], color=color, lw=2.0, label="Forecast")
@@ -268,8 +268,8 @@ def destination_bars(ct: pd.DataFrame, metric: str = "Received", title: str = ""
     ax.set_yticks(y, d["Country"], fontsize=7)
     ax.set_xlim(0, xmax * 1.3)
     _kfmt(ax, "x")
-    handles = [Patch(color=REL_COLOR[k], label=f"{k} reliability") for k in ("High", "Medium", "Low")]
-    handles += [Line2D([], [], color=INK, lw=0.8, label="Plan-for range"),
+    handles = [Patch(color=REL_COLOR[k], label=f"{k} confidence") for k in ("High", "Medium", "Low")]
+    handles += [Line2D([], [], color=INK, lw=0.8, label="Plan between"),
                 Line2D([], [], color=INK, marker="|", ls="", ms=9, label="Same months last year")]
     ax.legend(handles=handles, fontsize=6, frameon=False, loc="lower right")
     ax.set_title(title, fontsize=9, color=INK, loc="left")
@@ -527,6 +527,7 @@ def region_multiples(hist: pd.DataFrame, fc: pd.DataFrame, regions, title: str, 
 # ───────────────────────── "At a glance" visuals (operations / HR readers) ─────────────────────────
 UP, DOWN, FLAT = "#2a78d6", "#e0662a", "#9a9a95"
 CONF_DOTS = {"High": 3, "Medium": 2, "Low": 1}
+VERDICT = {"right": ("✓", "#2e9e5b"), "close": ("~", "#e0a100"), "missed": ("✗", "#d6453d")}
 
 
 def _pace_color(v, band: float = 5.0):
@@ -538,8 +539,9 @@ def _arrow(v) -> str:
 
 
 def kpi_cards(g: dict, size=(13.2, 2.25)) -> bytes:
-    """Four big cards: next quarter, busiest month (with the 12 months as small bars), the ongoing intake's pace,
-    and how sure we are (three-dot meter)."""
+    """Four big cards: next quarter (or its direction where forecasts are too uncertain for a number), busiest
+    month (12 months as small bars; staff needed once headcount is known), the ongoing intake's pace, and 'how
+    sure are we' with the last six months as right / close / missed."""
     from matplotlib.patches import Circle, FancyBboxPatch
     fig = plt.figure(figsize=size)
     fig.patch.set_facecolor("white")
@@ -553,16 +555,30 @@ def kpi_cards(g: dict, size=(13.2, 2.25)) -> bytes:
                                     fc=SURFACE, ec=GRID, lw=1))
         if i == 0 and g.get("next_quarter"):
             q = g["next_quarter"]
-            ax.text(0.07, 0.83, f"Applications, next 3 months ({q['from']:%b}–{q['to']:%b})", fontsize=8.5, color=INK_2)
-            ax.text(0.07, 0.42, f"{round(q['value'], -2):,.0f}", fontsize=27, fontweight="bold", color=INK)
             c = _pace_color(q["yoy"])
-            ax.text(0.07, 0.17, f"{_arrow(q['yoy'])} {q['yoy']:+.0f}% vs last year", fontsize=11, color=c, fontweight="bold")
-            ax.text(0.07, 0.05, f"plan between {_k(q['lo'])} and {_k(q['hi'])}", fontsize=7.5, color=INK_2)
+            ax.text(0.07, 0.83, f"Applications, next 3 months ({q['from']:%b}–{q['to']:%b})", fontsize=8.5, color=INK_2)
+            if g.get("direction_only"):
+                word = "Rising" if q["yoy"] > 5 else "Falling" if q["yoy"] < -5 else "Flat"
+                ax.text(0.07, 0.42, f"{_arrow(q['yoy'])} {word}", fontsize=25, fontweight="bold", color=c)
+                ax.text(0.07, 0.17, f"about {round(q['value'], -1):,.0f} ({q['yoy']:+.0f}% vs last year)", fontsize=9.5,
+                        color=INK)
+                ax.text(0.07, 0.05, f"direction only: forecasts here miss by about ±{q['miss']:.0f}%", fontsize=7.3,
+                        color=INK_2)
+            else:
+                ax.text(0.07, 0.42, f"{round(q['value'], -2 if q['value'] >= 2000 else -1):,.0f}", fontsize=27,
+                        fontweight="bold", color=INK)
+                ax.text(0.07, 0.17, f"{_arrow(q['yoy'])} {q['yoy']:+.0f}% vs last year", fontsize=11, color=c,
+                        fontweight="bold")
+                ax.text(0.07, 0.05, f"plan between {_k(q['lo'])} and {_k(q['hi'])}", fontsize=7.5, color=INK_2)
         elif i == 1 and g.get("peak"):
             p, m = g["peak"], g["months"]
             ax.text(0.07, 0.83, "Busiest month ahead", fontsize=8.5, color=INK_2)
-            ax.text(0.07, 0.52, f"{p['date']:%b %Y}", fontsize=22, fontweight="bold", color=INK)
-            ax.text(0.07, 0.36, f"about {round(p['value'], -2):,.0f} applications", fontsize=9, color=INK_2)
+            ax.text(0.07, 0.55, f"{p['date']:%b %Y}", fontsize=22, fontweight="bold", color=INK)
+            v_ = round(p["value"], -2 if p["value"] >= 2000 else -1)
+            sub = f"about {v_:,.0f} applications"
+            if g.get("staff"):
+                sub += f" · ~{g['staff']['need']:.0f} staff (today ~{g['staff']['today']:.0f})"
+            ax.text(0.07, 0.38, sub, fontsize=8.6, color=INK_2)
             if len(m):
                 v = m["Forecast"].to_numpy(dtype=float)
                 xs = 0.07 + np.arange(len(v)) * (0.86 / len(v))
@@ -573,8 +589,8 @@ def kpi_cards(g: dict, size=(13.2, 2.25)) -> bytes:
         elif i == 2:
             v = g.get("intake_pace", np.nan)
             ax.text(0.07, 0.83, f"{g.get('season') or 'Coming intake'}: applications so far", fontsize=8.5, color=INK_2)
-            c = _pace_color(v)
-            ax.text(0.07, 0.42, f"{_arrow(v)} {v:+.0f}%" if np.isfinite(v) else "–", fontsize=27, fontweight="bold", color=c)
+            ax.text(0.07, 0.42, f"{_arrow(v)} {v:+.0f}%" if np.isfinite(v) else "–", fontsize=27, fontweight="bold",
+                    color=_pace_color(v))
             ax.text(0.07, 0.17, "vs last year at this point", fontsize=10, color=INK_2)
         elif i == 3 and g.get("next_quarter"):
             q = g["next_quarter"]
@@ -582,12 +598,18 @@ def kpi_cards(g: dict, size=(13.2, 2.25)) -> bytes:
             col = REL_COLOR.get(q["confidence"], REL_COLOR["New"])
             ax.text(0.07, 0.83, "How sure are we?", fontsize=8.5, color=INK_2)
             for k in range(3):
-                ax.add_patch(Circle((0.13 + k * 0.13, 0.55), 0.045, fc=col if k < n else "#e4e3df", ec="none",
-                                    transform=ax.transData))
-            ax.text(0.52, 0.52, q["confidence"], fontsize=17, fontweight="bold", color=col, va="center")
+                ax.add_patch(Circle((0.12 + k * 0.1, 0.64), 0.035, fc=col if k < n else "#e4e3df", ec="none"))
+            ax.text(0.45, 0.63, q["confidence"], fontsize=15, fontweight="bold", color=col, va="center")
             if np.isfinite(q["miss"]):
-                ax.text(0.07, 0.24, f"usually within ±{q['miss']:.0f}%", fontsize=11, color=INK, fontweight="bold")
-                ax.text(0.07, 0.09, "of what actually happens (tested)", fontsize=7.5, color=INK_2)
+                ax.text(0.07, 0.44, f"usually within ±{q['miss']:.0f}%", fontsize=10, color=INK, fontweight="bold")
+            tr = g.get("track") or []
+            if tr:
+                ax.text(0.07, 0.3, "Last months, forecast vs actual:", fontsize=7, color=INK_2)
+                for k, t in enumerate(tr):
+                    sym, cc = VERDICT[t["verdict"]]
+                    x = 0.1 + k * 0.145
+                    ax.text(x, 0.15, sym, fontsize=13, fontweight="bold", color=cc, ha="center", va="center")
+                    ax.text(x, 0.05, f"{t['month']:%b}", fontsize=6.3, color=INK_2, ha="center")
     return _png(fig)
 
 
@@ -625,9 +647,9 @@ def stage_leak(leak, season: str, size=(6.4, 3.3)) -> bytes:
     return _png(fig)
 
 
-def traffic_grid(grid: pd.DataFrame, season: str, size=(6.4, 3.3)) -> bytes:
-    """Destinations x four signals as coloured tiles: blue = above last year, orange = below, grey = about the same;
-    confidence as green / amber / red."""
+def traffic_grid(grid: pd.DataFrame, season: str, title: str = "Destinations at a glance", size=(6.4, 3.3)) -> bytes:
+    """Rows (destinations, or a destination's regions) x four signals as coloured tiles: blue = above last year,
+    orange = below, grey = about the same; how sure we are as green / amber / red."""
     from matplotlib.patches import FancyBboxPatch
     cols = [("Next quarter", "Next 3 months\nvs last year"), ("Intake", f"{season}\napplications"),
             ("Deposits", f"{season}\ndeposits"), ("Confidence", "How sure\nare we")]
@@ -636,13 +658,15 @@ def traffic_grid(grid: pd.DataFrame, season: str, size=(6.4, 3.3)) -> bytes:
     fig.patch.set_facecolor("white")
     ax.set_axis_off()
     ax.set_xlim(0, 1)
-    ax.set_ylim(-0.5, n + 1.1)
+    ax.set_ylim(-0.5, max(n, 6) + 1.1)
     x0, w = 0.36, 0.155
+    top = max(n, 6)
     for j, (_, lab) in enumerate(cols):
-        ax.text(x0 + j * w + w / 2, n + 0.35, lab, ha="center", va="center", fontsize=6.8, color=INK_2)
+        ax.text(x0 + j * w + w / 2, top + 0.35, lab, ha="center", va="center", fontsize=6.8, color=INK_2)
     for i, r in enumerate(grid.to_dict("records")):
-        yy = n - 1 - i
-        ax.text(0.0, yy, r["Destination"], va="center", fontsize=7.6, color=INK)
+        yy = top - 1 - i
+        name = r["Destination"] if len(r["Destination"]) <= 26 else r["Destination"][:25] + "…"
+        ax.text(0.0, yy, name, va="center", fontsize=7.6, color=INK)
         for j, (key, _) in enumerate(cols):
             v = r[key]
             if key == "Confidence":
@@ -651,9 +675,35 @@ def traffic_grid(grid: pd.DataFrame, season: str, size=(6.4, 3.3)) -> bytes:
                 fc = _pace_color(v) if np.isfinite(v) else "#f1f1ef"
                 txt = (f"{_arrow(v)}{min(v, 999):+.0f}%" if np.isfinite(v) else "–")
             ax.add_patch(FancyBboxPatch((x0 + j * w + 0.008, yy - 0.36), w - 0.016, 0.72,
-                                        boxstyle="round,pad=0,rounding_size=0.02", fc=fc, ec="none",
-                                        alpha=0.9 if fc not in ("#f1f1ef",) else 1))
+                                        boxstyle="round,pad=0,rounding_size=0.02", fc=fc, ec="none"))
             ax.text(x0 + j * w + w / 2, yy, txt, ha="center", va="center", fontsize=7.4, fontweight="bold",
                     color="white" if fc not in ("#f1f1ef", FLAT) else INK)
-    ax.set_title("Destinations at a glance", fontsize=9.5, color=INK, loc="left")
+    ax.set_title(title, fontsize=9.5, color=INK, loc="left")
+    return _png(fig)
+
+
+def revision_bars(rev: dict, size=(6.4, 2.6)) -> bytes:
+    """What changed since last month's forecast, by destination (same months in both forecasts)."""
+    d = rev["by_destination"]
+    d = d[d["Change"].abs() >= 1]
+    fig, ax = plt.subplots(figsize=size)
+    fig.patch.set_facecolor("white")
+    _style(ax)
+    ax.set_facecolor("white")
+    y = np.arange(len(d))
+    v = d["Change"].to_numpy(dtype=float)
+    ax.barh(y, v, color=[UP if x > 0 else DOWN for x in v], height=0.62)
+    ax.axvline(0, color=INK_2, lw=0.8)
+    lim = float(np.nanmax(np.abs(v))) * 1.35 if len(v) else 1.0
+    for yi, x in zip(y, v):
+        ax.text(x + (0.02 * lim if x >= 0 else -0.02 * lim), yi, f"{'+' if x > 0 else '-'}{_k(abs(x))}", va="center",
+                ha="left" if x >= 0 else "right", fontsize=7, color=UP if x > 0 else DOWN, fontweight="bold")
+    ax.set_yticks(y, d["Country"], fontsize=7)
+    ax.set_xlim(-lim, lim)
+    _kfmt(ax, "x")
+    ax.grid(axis="y", visible=False)
+    ax.grid(axis="x", color=GRID, lw=0.6)
+    sign = "+" if rev["change"] >= 0 else "-"
+    ax.set_title(f"What changed since last month's forecast: {sign}{_k(abs(rev['change']))} ({rev['pct']:+.0f}%) "
+                 f"over the same {rev['months']} months", fontsize=8.6, color=INK, loc="left")
     return _png(fig)
