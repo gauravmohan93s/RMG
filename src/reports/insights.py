@@ -488,3 +488,75 @@ def story_messages(res, level: str = "Organisation", country: str = ORG, n: int 
             s += f"; likely final {_round(r['Projected_Final'])} (last year {_round(r['Last_Year_Final'])})"
         out.append(s + ".")
     return out[:n]
+
+
+# ───────────────────────── "At a glance" page (operations / HR readers) ─────────────────────────
+LEAK_STAGES = ("Received", "Submitted", "Offer", "Deposit", "Visa_Document", "Visa_Applied", "Visa_Granted")
+LEAK_ALERT_PP = 15.0       # deposits growing this many points slower than applications -> conversion alert
+BEHIND_PCT = -10.0         # a destination's ongoing intake this far behind last year -> on the watch list
+MIN_SIZE = 500             # destinations smaller than this (last year's season) are not called out
+
+
+def glance(res) -> dict:
+    """Everything the 'At a glance' page shows, computed once (and tested): headline cards, the stage
+    'leak' for the ongoing intake season, the destination traffic grid and three plain-language actions."""
+    t, fc = res.totals, res.forecast
+    q = t[(t["Level"] == "Organisation") & (t["Metric"] == "Received") & (t["Window"] == "Next 3 months")]
+    q = q.iloc[0] if len(q) else None
+    om = fc[(fc["Level"] == "Organisation") & (fc["Metric"] == "Received")].sort_values("Date")
+    peak = om.loc[om["Forecast"].idxmax()] if len(om) else None
+    out = {"next_quarter": None if q is None else {
+               "value": float(q["Forecast"]), "yoy": float(q["YoY_Pct"]), "lo": float(q["Lo80"]), "hi": float(q["Hi80"]),
+               "from": pd.Timestamp(q["From"]), "to": pd.Timestamp(q["To"]),
+               "confidence": str(q.get("Reliability", "")), "miss": float(q.get("Typical_Quarter_Error_Pct", np.nan))},
+           "months": om[["Date", "Forecast"]].assign(Date=lambda d: pd.to_datetime(d["Date"])) if len(om) else pd.DataFrame(),
+           "peak": None if peak is None else {"date": pd.Timestamp(peak["Date"]), "value": float(peak["Forecast"])}}
+    p = getattr(res, "intake_pace", None)
+    on = (p[(p["Phase"] == "Ongoing") & (p["Region"] == TOTAL)] if p is not None and len(p) and "Phase" in p
+          else pd.DataFrame(columns=["Level", "Country", "Metric", "Pace_Pct", "Intake", "Last_Year_Final"]))
+    org = on[on["Level"] == "Organisation"].set_index("Metric")
+    out["season"] = org["Intake"].iloc[0] if len(org) else ""
+    out["intake_pace"] = float(org.loc["Received", "Pace_Pct"]) if "Received" in org.index else np.nan
+    out["leak"] = [(m, float(org.loc[m, "Pace_Pct"])) for m in LEAK_STAGES
+                   if m in org.index and np.isfinite(org.loc[m, "Pace_Pct"])]
+    rp = out["intake_pace"]
+    dp = float(org.loc["Deposit", "Pace_Pct"]) if "Deposit" in org.index else np.nan
+    out["alert"] = (f"Applications for {out['season']} are {rp:+.0f}% on last year, but deposits only {dp:+.0f}%: "
+                    "fewer applications are turning into deposits." if np.isfinite(rp) and np.isfinite(dp)
+                    and rp - dp >= LEAK_ALERT_PP else "")
+    # destination grid
+    ct = t[(t["Level"] == "Country") & (t["Metric"] == "Received")]
+    q3 = ct[ct["Window"] == "Next 3 months"].set_index("Country")
+    y12 = ct[ct["Window"] == "Next 12 months"].set_index("Country")["Forecast"].sort_values(ascending=False)
+    cty = on[on["Level"] == "Country"]
+    pace = lambda m: cty[cty["Metric"] == m].set_index("Country")["Pace_Pct"]
+    size = cty[cty["Metric"] == "Received"].set_index("Country")["Last_Year_Final"]
+    rec, dep = pace("Received"), pace("Deposit")
+    grid = []
+    for c in y12.index:
+        if c not in q3.index or not np.isfinite(q3.loc[c, "Forecast"]) or y12[c] < 200:
+            continue
+        grid.append({"Destination": c, "Next quarter": float(q3.loc[c, "YoY_Pct"]),
+                     "Intake": float(rec.get(c, np.nan)), "Deposits": float(dep.get(c, np.nan)),
+                     "Confidence": str(q3.loc[c, "Reliability"]), "Miss": float(q3.loc[c, "Typical_Quarter_Error_Pct"])})
+    out["grid"] = pd.DataFrame(grid)
+    # actions
+    acts = []
+    if out["peak"]:
+        big = (fc[(fc["Level"] == "Country") & (fc["Metric"] == "Received") & (pd.to_datetime(fc["Date"]) == out["peak"]["date"])]
+               .sort_values("Forecast", ascending=False)["Country"].head(2).tolist())
+        acts.append(("Staffing", f"Busiest month ahead: {out['peak']['date']:%B %Y}, about {_round(out['peak']['value'])} "
+                                 f"applications" + (f" — mostly {_join(big)}." if big else ".")))
+    leaky = [(c, rec[c] - dep[c]) for c in rec.index if c in dep.index and np.isfinite(rec[c]) and np.isfinite(dep[c])
+             and size.get(c, 0) >= MIN_SIZE and rec[c] - dep[c] >= LEAK_ALERT_PP]
+    leaky = [c for c, _ in sorted(leaky, key=lambda x: -x[1])[:3]]
+    acts.append(("Conversion", f"Deposits are growing much slower than applications in {_join(leaky)}: check offer "
+                               "follow-up and deposit chasing." if leaky else
+                 "Deposits are keeping pace with applications in every large destination."))
+    behind = [c for c in rec.index if np.isfinite(rec[c]) and rec[c] <= BEHIND_PCT and size.get(c, 0) >= MIN_SIZE]
+    behind = sorted(behind, key=lambda c: rec[c])[:3]
+    acts.append(("Watch", f"Behind last year for {out['season']}: " + _join([f"{c} ({rec[c]:+.0f}%)" for c in behind]) +
+                 " — review with the market teams." if behind else
+                 f"No large destination is more than {abs(BEHIND_PCT):.0f}% behind last year for {out['season']}."))
+    out["actions"] = acts
+    return out

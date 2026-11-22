@@ -49,3 +49,13 @@ def test_node_plan_requires_enough_training():
     L, origins, elig = node_plan(n_months=30, s=50, origins=list(range(60, 80)), models=["SNaive", "ETS"])
     assert L == 18 and all(o - 50 + 1 >= 18 for o in origins)
     assert elig == ["SNaive"]                    # ETS needs 24 months at the first origin
+
+
+def test_backtest_is_repeatable(panel):
+    """Same data and seed -> identical predictions (parallel workers, ML models included), so a re-run can
+    never change the numbers or the method decisions on its own."""
+    ids = list(panel.y)[:3]
+    a, b = _run(panel, ids).preds, _run(panel, ids).preds
+    keys = ["node_id", "Model", "o", "h"]
+    a, b = a.sort_values(keys).reset_index(drop=True), b.sort_values(keys).reset_index(drop=True)
+    assert a[keys].equals(b[keys]) and np.allclose(a["Pred"], b["Pred"], rtol=0, atol=0, equal_nan=True)

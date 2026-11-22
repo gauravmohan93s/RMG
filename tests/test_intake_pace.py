@@ -56,3 +56,10 @@ def test_stage_counts_by_intake_join_the_same_view(tmp_path):
     assert (s["Intake_Start"] == pd.Timestamp("2027-01-01")).all() and s["Apps"].sum() == 12   # 'Spring' = Jan
     long = ip.intake_long(_cleaned(), s)
     assert {"Received", "Submitted", "Offer"} <= set(long["Metric"])
+
+
+def test_enrolled_is_left_out_of_the_intake_view():
+    s = pd.DataFrame({"Country": ["UK"] * 2, "Region": ["North"] * 2, "Metric": ["Offer", "Enrolled"],
+                      "Date": pd.to_datetime(["2026-09-01"] * 2), "Intake_Start": pd.to_datetime(["2027-01-01"] * 2),
+                      "Apps": [5.0, 3.0]})
+    assert "Enrolled" not in set(ip.intake_long(_cleaned(), s)["Metric"])

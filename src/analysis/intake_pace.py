@@ -50,6 +50,7 @@ MAX_RANGE_RATIO = 2.5      # a projection whose 80% range spans more than 2.5x i
 PACE_BAND = 5.0
 MIN_INTAKE = {"Organisation": 100, "Country": 30, "Region": 30}   # last year's season at least this big
 SHOW_NEXT = 3              # ongoing + the two after it
+NOT_BY_INTAKE = ("Enrolled",)   # confirmed long after the intake starts: its season counts would mislead
 
 
 def _mi(d) -> int:
@@ -126,7 +127,7 @@ def intake_long(intake_df: pd.DataFrame, stage_df: pd.DataFrame = None) -> pd.Da
     if not parts:
         return pd.DataFrame()
     d = pd.concat(parts, ignore_index=True)
-    d = d[d["Apps"] > 0]
+    d = d[(d["Apps"] > 0) & ~d["Metric"].isin(NOT_BY_INTAKE)]
     keys = ["Metric", "Date", "Intake_Start"]
     reg = d.groupby(["Country", "Region"] + keys, as_index=False)["Apps"].sum().assign(Level="Region")
     cty = d.groupby(["Country"] + keys, as_index=False)["Apps"].sum().assign(Level="Country", Region=TOTAL)

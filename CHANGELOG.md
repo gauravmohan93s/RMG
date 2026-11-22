@@ -3,7 +3,33 @@
 All notable changes are recorded here. Format: [Keep a Changelog](https://keepachangelog.com/);
 versioning: [SemVer](https://semver.org/) as defined in `docs/ROADMAP.md`.
 
-## [2.6.1] — 2026-10-26
+## [2.7.0] — 2026-11-22
+
+### Added
+- **"At a glance" page first in the pack,** for operations and HR readers. It is visual, with almost no text:
+  - **Four big cards:** applications next quarter (▲/▼ vs last year, plan-between range); the busiest month
+    ahead, with the 12 months as small bars; the ongoing intake's pace vs last year; and "how sure are we"
+    (a three-dot meter, usually within ±x%).
+  - **Conversion alert:** shown when deposits grow at least 15 points slower than applications for the ongoing
+    intake season.
+  - **"Where growth leaks":** one bar per stage, from applications received to visas granted, vs last year.
+  - **Destination traffic grid:** next 3 months, intake applications, intake deposits and confidence.
+  - **"What to do":** three action cards (staffing peak, conversion, destinations behind last year),
+    generated from the numbers with fixed thresholds (`insights.glance`).
+- **Repeatability test:** the same data and seed give identical backtest predictions (all 17 models,
+  measured on real data too).
+
+### Changed
+- Enrolled is left out of the intake-season view: enrolment is confirmed long after an intake starts, so its
+  season counts would mislead. It stays in the pipeline forecast.
+
+### Corrected
+- **Why decisions flipped on 26 Oct (2.6.0 note):** the cause was not random noise. The models are fully
+  repeatable. The components are tested one after another, each on top of the choices made before it, so one
+  near-tie switch (how regions add up: 2.0%) changed the next test (calendar effects: 2.0% vs 3.2%). The
+  2.6.0 rule (switch only on >= 3% at the quarterly review) stops that chain at the first near-tie.
+
+ — 2026-10-26
 Version stamp and release notes for the 2.6 changes (the `v2.6.0` tag carries the code but still reported
 2.5.2 in outputs).
 

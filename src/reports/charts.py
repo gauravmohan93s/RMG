@@ -522,3 +522,138 @@ def region_multiples(hist: pd.DataFrame, fc: pd.DataFrame, regions, title: str, 
     fig.suptitle(title, fontsize=9, color=INK, x=0.01, ha="left")
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     return _png(fig)
+
+
+# ───────────────────────── "At a glance" visuals (operations / HR readers) ─────────────────────────
+UP, DOWN, FLAT = "#2a78d6", "#e0662a", "#9a9a95"
+CONF_DOTS = {"High": 3, "Medium": 2, "Low": 1}
+
+
+def _pace_color(v, band: float = 5.0):
+    return FLAT if v is None or not np.isfinite(v) or abs(v) < band else (UP if v > 0 else DOWN)
+
+
+def _arrow(v) -> str:
+    return "" if v is None or not np.isfinite(v) else ("▲" if v > 0 else "▼")
+
+
+def kpi_cards(g: dict, size=(13.2, 2.25)) -> bytes:
+    """Four big cards: next quarter, busiest month (with the 12 months as small bars), the ongoing intake's pace,
+    and how sure we are (three-dot meter)."""
+    from matplotlib.patches import Circle, FancyBboxPatch
+    fig = plt.figure(figsize=size)
+    fig.patch.set_facecolor("white")
+    W = 0.235
+    for i in range(4):
+        ax = fig.add_axes([0.005 + i * (W + 0.014), 0.04, W, 0.92])
+        ax.set_axis_off()
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.add_patch(FancyBboxPatch((0.01, 0.02), 0.98, 0.96, boxstyle="round,pad=0,rounding_size=0.06",
+                                    fc=SURFACE, ec=GRID, lw=1))
+        if i == 0 and g.get("next_quarter"):
+            q = g["next_quarter"]
+            ax.text(0.07, 0.83, f"Applications, next 3 months ({q['from']:%b}–{q['to']:%b})", fontsize=8.5, color=INK_2)
+            ax.text(0.07, 0.42, f"{round(q['value'], -2):,.0f}", fontsize=27, fontweight="bold", color=INK)
+            c = _pace_color(q["yoy"])
+            ax.text(0.07, 0.17, f"{_arrow(q['yoy'])} {q['yoy']:+.0f}% vs last year", fontsize=11, color=c, fontweight="bold")
+            ax.text(0.07, 0.05, f"plan between {_k(q['lo'])} and {_k(q['hi'])}", fontsize=7.5, color=INK_2)
+        elif i == 1 and g.get("peak"):
+            p, m = g["peak"], g["months"]
+            ax.text(0.07, 0.83, "Busiest month ahead", fontsize=8.5, color=INK_2)
+            ax.text(0.07, 0.52, f"{p['date']:%b %Y}", fontsize=22, fontweight="bold", color=INK)
+            ax.text(0.07, 0.36, f"about {round(p['value'], -2):,.0f} applications", fontsize=9, color=INK_2)
+            if len(m):
+                v = m["Forecast"].to_numpy(dtype=float)
+                xs = 0.07 + np.arange(len(v)) * (0.86 / len(v))
+                h = 0.2 * v / v.max()
+                for x, hh, d in zip(xs, h, m["Date"]):
+                    ax.add_patch(FancyBboxPatch((x, 0.07), 0.86 / len(v) * 0.7, hh, boxstyle="square,pad=0",
+                                                fc=UP if d == p["date"] else "#c9d6e8", ec="none"))
+        elif i == 2:
+            v = g.get("intake_pace", np.nan)
+            ax.text(0.07, 0.83, f"{g.get('season') or 'Coming intake'}: applications so far", fontsize=8.5, color=INK_2)
+            c = _pace_color(v)
+            ax.text(0.07, 0.42, f"{_arrow(v)} {v:+.0f}%" if np.isfinite(v) else "–", fontsize=27, fontweight="bold", color=c)
+            ax.text(0.07, 0.17, "vs last year at this point", fontsize=10, color=INK_2)
+        elif i == 3 and g.get("next_quarter"):
+            q = g["next_quarter"]
+            n = CONF_DOTS.get(q["confidence"], 0)
+            col = REL_COLOR.get(q["confidence"], REL_COLOR["New"])
+            ax.text(0.07, 0.83, "How sure are we?", fontsize=8.5, color=INK_2)
+            for k in range(3):
+                ax.add_patch(Circle((0.13 + k * 0.13, 0.55), 0.045, fc=col if k < n else "#e4e3df", ec="none",
+                                    transform=ax.transData))
+            ax.text(0.52, 0.52, q["confidence"], fontsize=17, fontweight="bold", color=col, va="center")
+            if np.isfinite(q["miss"]):
+                ax.text(0.07, 0.24, f"usually within ±{q['miss']:.0f}%", fontsize=11, color=INK, fontweight="bold")
+                ax.text(0.07, 0.09, "of what actually happens (tested)", fontsize=7.5, color=INK_2)
+    return _png(fig)
+
+
+LEAK_LABEL = {"Received": "Applications received", "Submitted": "Submitted", "Offer": "Offers", "Deposit": "Deposits",
+              "Visa_Document": "Visa documents", "Visa_Applied": "Visa applied", "Visa_Granted": "Visas granted"}
+
+
+def stage_leak(leak, season: str, size=(6.4, 3.3)) -> bytes:
+    """One bar per stage of the ongoing intake: change vs last year at the same point. Falling bars from left to
+    right = growth leaking out of the pipeline."""
+    fig, ax = plt.subplots(figsize=size)
+    fig.patch.set_facecolor("white")
+    _style(ax)
+    ax.set_facecolor("white")
+    if not leak:
+        ax.set_axis_off()
+        ax.text(0.5, 0.5, "Stage data by intake not available yet", ha="center", va="center", color=INK_2)
+        return _png(fig)
+    labs = [LEAK_LABEL.get(m, m) for m, _ in leak]
+    vals = np.array([v for _, v in leak], dtype=float)
+    shown = np.clip(vals, -100, 150)
+    y = np.arange(len(vals))[::-1]
+    ax.barh(y, shown, color=[_pace_color(v) for v in vals], height=0.62)
+    ax.axvline(0, color=INK_2, lw=0.8)
+    for yi, v, s in zip(y, vals, shown):
+        ax.text(s + (3 if s >= 0 else -3), yi, f"{v:+.0f}%", va="center", ha="left" if s >= 0 else "right",
+                fontsize=8.5, fontweight="bold", color=_pace_color(v))
+    ax.set_yticks(y, labs, fontsize=8)
+    lim = max(20, np.nanmax(np.abs(shown)) * 1.35)
+    ax.set_xlim(-lim, lim)
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:+.0f}%"))
+    ax.grid(axis="y", visible=False)
+    ax.grid(axis="x", color=GRID, lw=0.6)
+    ax.set_title(f"{season}: each stage vs last year at the same point", fontsize=9.5, color=INK, loc="left")
+    return _png(fig)
+
+
+def traffic_grid(grid: pd.DataFrame, season: str, size=(6.4, 3.3)) -> bytes:
+    """Destinations x four signals as coloured tiles: blue = above last year, orange = below, grey = about the same;
+    confidence as green / amber / red."""
+    from matplotlib.patches import FancyBboxPatch
+    cols = [("Next quarter", "Next 3 months\nvs last year"), ("Intake", f"{season}\napplications"),
+            ("Deposits", f"{season}\ndeposits"), ("Confidence", "How sure\nare we")]
+    n = len(grid)
+    fig, ax = plt.subplots(figsize=size)
+    fig.patch.set_facecolor("white")
+    ax.set_axis_off()
+    ax.set_xlim(0, 1)
+    ax.set_ylim(-0.5, n + 1.1)
+    x0, w = 0.36, 0.155
+    for j, (_, lab) in enumerate(cols):
+        ax.text(x0 + j * w + w / 2, n + 0.35, lab, ha="center", va="center", fontsize=6.8, color=INK_2)
+    for i, r in enumerate(grid.to_dict("records")):
+        yy = n - 1 - i
+        ax.text(0.0, yy, r["Destination"], va="center", fontsize=7.6, color=INK)
+        for j, (key, _) in enumerate(cols):
+            v = r[key]
+            if key == "Confidence":
+                fc, txt = REL_COLOR.get(v, REL_COLOR["New"]), f"±{r['Miss']:.0f}%" if np.isfinite(r["Miss"]) else v
+            else:
+                fc = _pace_color(v) if np.isfinite(v) else "#f1f1ef"
+                txt = (f"{_arrow(v)}{min(v, 999):+.0f}%" if np.isfinite(v) else "–")
+            ax.add_patch(FancyBboxPatch((x0 + j * w + 0.008, yy - 0.36), w - 0.016, 0.72,
+                                        boxstyle="round,pad=0,rounding_size=0.02", fc=fc, ec="none",
+                                        alpha=0.9 if fc not in ("#f1f1ef",) else 1))
+            ax.text(x0 + j * w + w / 2, yy, txt, ha="center", va="center", fontsize=7.4, fontweight="bold",
+                    color="white" if fc not in ("#f1f1ef", FLAT) else INK)
+    ax.set_title("Destinations at a glance", fontsize=9.5, color=INK, loc="left")
+    return _png(fig)

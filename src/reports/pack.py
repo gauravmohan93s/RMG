@@ -548,10 +548,44 @@ def _destination(res, S, country: str, label: str) -> List:
     return _headline(res, S, "Country", country, "A", label) + _destination_b(res, S, country, label)
 
 
+# ───────────────────────────── page 0: at a glance (operations / HR) ─────────────────────────────
+ACTION_COLOR = {"Staffing": colors.HexColor("#2a78d6"), "Conversion": colors.HexColor("#e0662a"),
+                "Watch": colors.HexColor("#b36b00")}
+
+
+def _page_glance(res, S) -> List:
+    g = ins.glance(res)
+    out = [_band("", "At a glance", "The month in one page: what is coming, where it is coming from, and what to act on.",
+                 res, S), Spacer(0, 6), _img(charts.kpi_cards(g), FULL_W), Spacer(0, 6)]
+    if g["alert"]:
+        t = Table([[Paragraph(f"<b>Conversion alert.</b> {g['alert']}", ParagraphStyle(
+            "al", parent=S["msg"], textColor=colors.white, fontSize=9, leading=11.5))]], colWidths=[FULL_W * cm])
+        t.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#e0662a")),
+                               ("LEFTPADDING", (0, 0), (-1, -1), 10), ("TOPPADDING", (0, 0), (-1, -1), 4),
+                               ("BOTTOMPADDING", (0, 0), (-1, -1), 4)]))
+        out += [t, Spacer(0, 6)]
+    left = _img(charts.stage_leak(g["leak"], g["season"], size=(6.4, 3.25)), HALF)
+    right = (_img(charts.traffic_grid(g["grid"], g["season"], size=(6.4, 3.25)), HALF) if len(g["grid"]) else "")
+    out += [_row([left, right], [HALF + 0.3, HALF]), Spacer(0, 6)]
+    head = ParagraphStyle("ah", parent=S["msg"], fontName="Helvetica-Bold", fontSize=9, leading=11, leftIndent=0)
+    body = ParagraphStyle("ab", parent=S["msg"], fontSize=8.4, leading=10.6, leftIndent=0)
+    w = FULL_W / 3
+    cells = [[Paragraph(k, head), Spacer(0, 2), Paragraph(v, body)] for k, v in g["actions"]]
+    t = Table([cells], colWidths=[w * cm] * len(cells))
+    st = [("VALIGN", (0, 0), (-1, -1), "TOP"), ("BACKGROUND", (0, 0), (-1, -1), SOFT),
+          ("LEFTPADDING", (0, 0), (-1, -1), 9), ("RIGHTPADDING", (0, 0), (-1, -1), 9),
+          ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6)]
+    for j, (k, _) in enumerate(g["actions"]):
+        st.append(("LINEBEFORE", (j, 0), (j, 0), 4, ACTION_COLOR.get(k, NAVY)))
+    t.setStyle(TableStyle(st))
+    return out + [Paragraph("<b>What to do</b>", head), Spacer(0, 3), t, PageBreak()]
+
+
 # ───────────────────────────── documents ─────────────────────────────
 def write_story(res, path: Path) -> Path:
     S = _s()
-    story: List = _headline(res, S, "Organisation", ORG, "1", "Where we are heading — Organisation")
+    story: List = _page_glance(res, S)
+    story += _headline(res, S, "Organisation", ORG, "1", "Where we are heading — Organisation")
     story += _ch2_accuracy(res, S) + _ch3_destinations(res, S) + _ch4_pipeline(res, S) + _ch4_intakes(res, S)
     story += _ch5_capacity(res, S) + _ch6_trust(res, S)
     for c, lab in _countries(res):
