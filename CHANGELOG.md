@@ -3,7 +3,41 @@
 All notable changes are recorded here. Format: [Keep a Changelog](https://keepachangelog.com/);
 versioning: [SemVer](https://semver.org/) as defined in `docs/ROADMAP.md`.
 
-## [2.7.0] — 2026-11-22
+## [2.8.1] — 2026-11-22
+Version stamp and release notes for 2.8 (the `v2.8.0` tag carries the code but still reported 2.7.0 in outputs).
+
+## [2.8.0] — 2026-11-22
+
+### Added
+- **"At a glance" page for every destination,** first in its PDF (now 3 pages: at a glance, headline,
+  regions / pipeline / intakes).
+  - **Content:** the same cards, alert, stage bars and three actions as the organisation page, with the
+    destination's own regions / teams in the traffic grid and the actions.
+  - **Single-region destinations:** judged on their own, with a "Did we get it right?" chart in place of the
+    grid.
+- **"Did we get it right?":** the last 6 months of forecast (made a month before) vs actual as ✓ / ~ / ✗ on the
+  "how sure" card (within 10% / 10–20% / more).
+- **"What changed since last month's forecast":** a bar chart by destination on the same months
+  (chapter 2). November: +9.1k (+2%), UK +14k, Australia −3.1k.
+- **Staff needed at the busiest month:** shown on the card and in the staffing action once the live sheets carry
+  headcount for at least half the volume. Until then the action asks for it.
+- **Direction only:** where forecasts have been Low confidence, the card shows ▲ Rising / ▼ Falling with the
+  typical miss, and page A opens with a grey banner: read the trend, not the exact number.
+- **The e-mail shows the "At a glance" page as a picture inside the message** (pack still attached; e-mails remain
+  off until enabled).
+- **Lead discovery:** `python fetch_data.py --discover-leads`, read-only. It lists enquiry / lead / counselling
+  tables with columns and row counts in `lead_discovery.xlsx`, and runs once automatically at the next fetch,
+  so a leading indicator can be chosen and tested.
+
+### Changed
+- **Plain words throughout:** "Plan between" replaces "plan for"; "How sure are we" replaces "Reliability".
+
+### Tested and rejected
+- **Intake pace as an input to the next-quarter receipts forecast:** worse at every weight (11.9% → 15–26% typical
+  miss, 230 walk-forward tests). It stays as the intake indicator. See
+  `docs/experiments/2026-11-22_intake_pace_as_forecast_input.md`.
+
+ — 2026-11-22
 
 ### Added
 - **"At a glance" page first in the pack,** for operations and HR readers. It is visual, with almost no text:

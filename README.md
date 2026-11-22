@@ -8,7 +8,7 @@ every month.
 ## What you get each month
 | Output | For |
 |---|---|
-| `Outcomes/Latest/` (and `Outcomes/<YYYY-MM> Forecast Pack/`) | Executives: the monthly pack, one PDF per destination, the workbook |
+| `Outcomes/Latest/` (and `Outcomes/<YYYY-MM> Forecast Pack/`) | Executives: the monthly pack, one 3-page PDF per destination (at a glance, headline, regions), the workbook |
 | `Reports/RMG_Monthly_Pack_<date>.pdf` | Leadership pack, opening with a one-page visual "At a glance" (cards, conversion alert, destination traffic grid, three actions), then read as a story: where we are heading, last month and accuracy, where growth comes from, pipeline and the coming intakes, capacity, can we trust it; then two pages per destination down to its regions |
 | `Reports/RMG_Forecast_<date>.xlsx` | Planners and analysts: every number plus all evidence sheets (method decisions, tests, calibration) |
 | `Forms/Live/<Country>.xlsx` | Country teams: a live sheet shared once. Region × month grid of actual, model and their view, plus staffing; read at every run and rolled forward after it |

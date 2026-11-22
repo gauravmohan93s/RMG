@@ -220,6 +220,13 @@ skipped and refreshed the next month. Run the steps by hand with
 
 Do not rename or move the files: the pipeline finds them by name and a hidden `_key` sheet.
 
+### Leading indicators: finding enquiry / lead data
+`python fetch_data.py --discover-leads` (read-only) writes `RMG Calculations/lead_discovery.xlsx`: every table
+whose name suggests enquiries, leads, registrations, counselling or appointments, with columns and row counts. It
+also runs once by itself at the next `fetch-data`. Send the file back to the forecasting work: a candidate
+indicator is then extracted monthly and tested walk-forward. It is used only if it makes next-quarter totals at
+least 3% more accurate.
+
 ### Monthly e-mails (off until you switch them on)
 Every `publish` builds the e-mails and saves them as previews in `Predictions/<run>/Reports/Email_preview/`
 (open the `.eml` files in Outlook):
